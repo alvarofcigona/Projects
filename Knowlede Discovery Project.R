@@ -1,0 +1,249 @@
+library(dplyr)
+library(tidyverse)
+library(LiblineaR)
+library(ggplot2)
+library(dslabs)
+library(caret)
+library(LiblineaR)
+library(Metrics)
+library(rpart)
+library(randomForest)
+library(rpart.plot)
+
+data_2022 <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Combined_Flights_med_2022.csv")
+data_2021 <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Combined_Flights_med_2021.csv")
+data_2020 <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Combined_Flights_med_2020.csv")
+data_2019 <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Combined_Flights_med_2019.csv")
+data_2018 <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Combined_Flights_med_2018.csv")
+
+combined_data <- bind_rows(data_2018, data_2019, data_2020, data_2021, data_2022)
+
+data_1 <- combined_data[, !names(combined_data) %in% c("Cancelled", "Diverted", "ArrDel15", "FlightDate", "Operated_or_Branded_Code_Share_Partners", "DOT_ID_Marketing_Airline", "IATA_Code_Marketing_Airline", "Flight_Number_Marketing_Airline", "Originally_Scheduled_Code_Share_Airline", "DOT_ID_Originally_Scheduled_Code_Share_Airline", "IATA_Code_Originally_Scheduled_Code_Share_Airlin", "Flight_Num_Originally_Scheduled_Code_Share_Airline", "Operating_Airline", "DOT_ID_Operating_Airline", "IATA_Code_Operating_Airline", "Tail_Number", "Flight_Number_Operating_Airline", "OriginAirportSeqID", "OriginCityMarketID", "OriginCityName", "Origin", "OriginState", "OriginStateFips", "OriginStateName", "OriginWac", "DestAirportSeqID", "DestCityMarketID", "Dest", "DestCityName", "DestState", "DestStateFips", "DestStateName", "DestWac", "DepDelay", "DepDelayMinutes", "DepDel15", "DepartureDelayGroups", "DepTimeBlk", "TaxiOut", "WheelsOff", "WheelsOn", "TaxiIn", "ArrDelay", "ArrDelayMinutes", "ArrDel15", "ArrivalDelayGroups", "ArrTimeBlk", "CancellationCode", "CRSElapsedTime", "ActualElapsedTime", "DistanceGroup", "CarrierDelay", "AirTime", "WeatherDelay", "NASDelay", "LateAircraftDelay", "FirstDepTime", "TotalAddGTime", "LongestAddGTime", "DivAirportLandings", "DivReachedDest", "DivActualElapsedTime", "DivArrDelay", "DivDistance", "Div1Airport", "Div1AirportID	", "Div1AirportSeqID", "Div1WheelsOn", "Div1TotalGTime", "Div1LongestGTime", "Div1WheelsOff", "Div1TailNum", "Div2Airport", "Div2AirportID", "Div2AirportSeqID", "Div2WheelsOn", "Div2TotalGTime", "Div2LongestGTime", "Div2WheelsOff", "Div2TailNum", "Div3Airport", "Div3AirportID", "Div3AirportSeqID", "Div3WheelsOn", "Div3TotalGTime", "Div3LongestGTime", "Div3WheelsOff", "Div3TailNum", "Div4Airport", "Div4AirportID", "Div4AirportSeqID", "Div4WheelsOn", "Div4TotalGTime", "Div4LongestGTime", "Div4WheelsOff", "Div4TailNum", "Div5Airport", "Div5AirportID", "Div5AirportSeqID", "Div5WheelsOn", "Div5TotalGTime", "Div5LongestGTime", "Div5WheelsOff", "Div5TailNum", "Duplicate", "DayOfWeek", "Quarter", "DayofMonth")]
+
+###Splitting the data
+split_train_test <- function(data, test_ratio){
+  shuffled_indices <- sample(1:nrow(data))
+  test_set_size <- as.integer(nrow(data)*test_ratio)
+  test_indices <- shuffled_indices[1:test_set_size]
+  train_indices <- shuffled_indices[(test_set_size+1):nrow(data)]
+  sets_out <- list(train=data[train_indices,], test=data[test_indices,])
+  return(sets_out)
+}
+
+train_test_sets <- split_train_test(data_1, 0.2)
+training_set <- train_test_sets$train
+test_set <- train_test_sets$test
+
+###divide predictors and predicted variables on train set
+y_train <- training_set$Disruption
+y_train <- as.data.frame(y_train)
+x_train <- subset(training_set, select = -Disruption)
+#fill missing values on y
+y_train[is.na(y_train)] <- 0
+
+training_set_vis <- cbind(x_train, y_train)
+###Data visualisation
+training_set_vis |> 
+  filter(y_train==1) |>
+  ggplot(aes(x=Year)) + 
+           geom_histogram(bins=5)
+
+training_set_vis |>
+  group_by(Marketing_Airline_Network) |>
+  summarise(prop_disrup = mean(y_train)) |>
+  ggplot(aes(x=Marketing_Airline_Network, y=prop_disrup)) +geom_col()
+
+training_set_vis |>
+  group_by(Distance) |>
+  summarise(prop_disrup = mean(y_train)) |>
+  ggplot(aes(x=Distance, y=prop_disrup)) +geom_col()
+
+training_set_vis |>
+  group_by(Year) |>
+  summarise(prop_disrup = mean(y_train)) |>
+  ggplot(aes(x=Year, y=prop_disrup)) +geom_col(bin=5)
+
+training_set_vis |>
+  group_by(Month) |>
+  summarise(prop_disrup = mean(y_train)) |>
+  ggplot(aes(x=Month, y=prop_disrup)) + geom_col(bin = 12)
+ 
+
+###divide predictors and predicted variables on test set
+y_test <- test_set$Disruption
+y_test <- as.data.frame(y_test)
+x_test <- subset(test_set, select = -Disruption)
+#fill missing values on y
+y_test[is.na(y_test)] <- 0
+
+###Scaling numerical values TRAIN
+data_numerical_train <- select(x_train, -Year, -Month, -Airline, -Marketing_Airline_Network, -OriginAirportID, -DestAirportID)
+# Calculate medians.
+data_num_medians_train <- data_numerical_train %>% summarise(across(everything(), \(x) median( x, na.rm=TRUE)))
+# replace nas with calculate medians
+data_num_def_train <- data_numerical_train %>% tidyr::replace_na(as.list(data_num_medians_train))
+#standarize num data
+data_num_def1_train <- data_num_def_train %>% mutate(across(everything(), scale))
+
+
+###one-hot encoder for categorical TRAIN
+one_hot_encoder_train <- dummyVars("~ Year + Month + Airline + Marketing_Airline_Network + OriginAirportID + DestAirportID", data=x_train)
+categorical_encoded_train <- data.frame(predict(one_hot_encoder_train, newdata = x_train))
+head(categorical_encoded_train)
+data_cat_def_train <- categorical_encoded_train
+
+#combining cat and num
+training_data_x <- bind_cols(data_num_def1_train, data_cat_def_train)
+
+###Scaling numerical values TEST
+data_numerical_test <- select(x_test, -Year, -Month, -Airline, -Marketing_Airline_Network, -OriginAirportID, -DestAirportID)
+# Calculate medians.
+data_num_medians_test <- data_numerical_test %>% summarise(across(everything(), \(x) median( x, na.rm=TRUE)))
+# replace nas with calculate medians
+data_num_def_test <- data_numerical_test %>% tidyr::replace_na(as.list(data_num_medians_test))
+#standarize num data
+data_num_def1_test <- data_num_def_test %>% mutate(across(everything(), scale))
+
+
+###one-hot encoder for categorical TEST
+one_hot_encoder_test <- dummyVars("~ Year + Month + Airline + Marketing_Airline_Network + OriginAirportID + DestAirportID", data=x_test)
+categorical_encoded_test <- data.frame(predict(one_hot_encoder_test, newdata = x_test))
+head(categorical_encoded_test)
+data_cat_def_test <- categorical_encoded_test
+#combining cat and num
+testing_data_x <- bind_cols(data_num_def1_test, data_cat_def_test)
+
+
+
+###SGD classifier
+set.seed(1234)
+sgd_classifier <- LiblineaR(data=training_data_x, target = y_train)
+predictions <- predict(sgd_classifier, newx=matrix(testing_data_x[1,], nrow=1))
+
+#measure accuracy on test set
+predictions <- predict(sgd_classifier, newx=testing_data_x)
+sum(predictions$predictions == y_test) / nrow(x_test)
+summary(x_test)
+
+#predictions
+test_set_predictions <- predict(sgd_classifier, newx=testing_data_x)
+test_set_predictions
+test_set_preds <- as.numeric(test_set_predictions$predictions==TRUE)
+test_set_preds
+test_set_labs <- as.numeric(y_test==TRUE)
+test_set_labs
+# calculate precision
+test_precision <- Metrics::precision(test_set_labs, test_set_preds)
+test_precision
+
+#test recall
+test_recall <- Metrics::recall(test_set_labs, test_set_preds)
+test_recall
+
+#f1
+test_f1 <- 2 * (test_precision * test_recall)/(test_precision + test_recall)
+test_f1
+
+###Precision vs Recall curve
+# output includes predictions and scores
+y_valid_output <- predict(sgd_classifier, newx=testing_data_x, decisionValues = TRUE)
+# get just score
+y_valid_score <- y_valid_output$decisionValues[,1]
+
+get_precisions <- function(threshold, score, labels){
+  predictions <- score > threshold
+  TP <- sum((predictions == TRUE) & (labels == TRUE))
+  FP <- sum((predictions == TRUE) & (labels == FALSE))
+  return(TP/(TP+FP))
+}
+get_recalls <- function(threshold, score, labels){
+  predictions <- score > threshold
+  TP <- sum((predictions == TRUE) & (labels == TRUE))
+  FN <- sum((predictions == FALSE) & (labels == TRUE))
+  return(TP/(TP+FN))
+}
+
+# create a set of thresholds
+thresholds <- seq(min(y_valid_score)+0.01, max(y_valid_score)-0.01, length.out=1000)
+# get precision and recall
+precisions <- sapply(thresholds, get_precisions, score=y_valid_score, labels=y_test)
+recalls <- sapply(thresholds, get_recalls, score=y_valid_score, labels=y_test)
+ggplot() + geom_line(aes(x=recalls, y=precisions), color='blue') + 
+  xlab("Recall") + ylab("Precision") + theme_bw(base_size=18)
+
+###ROC curve
+get_FPRs <- function(threshold, score, labels){
+  predictions <- score > threshold
+  FP <- sum((predictions == TRUE) & (labels == FALSE))
+  TN <- sum((predictions == FALSE) & (labels == FALSE))
+  FPR <- FP / (FP+TN)
+  return(FPR)
+}
+
+FPRs <- sapply(thresholds, get_FPRs, score=y_valid_score, labels = y_test)
+
+ggplot() + geom_line(aes(x=FPRs, y=recalls), color='blue', linewidth=2) + 
+  xlab("FPR") + ylab("TPR") + 
+  theme_bw(base_size=18) + 
+  geom_abline(linetype=4, lionewidth=2)
+
+###Decision Tree and random Forest
+library(rpart)
+library(randomForest)
+set.seed(5059)
+
+
+# set thresholds - decision tree and random forest output probabilities
+prob_thresholds <- seq(0, 1, length.out=1000)
+
+# fit decision tree
+tree_classifier <- rpart(y_train$y_train~., training_data_x)
+tree_predictions <- predict(tree_classifier, newdata=testing_data_x)
+summary(tree_predictions)
+tree_FPRs <- sapply(prob_thresholds, get_FPRs, score=tree_predictions, labels=y_test)
+tree_FPRs
+tree_recalls <- sapply(prob_thresholds, get_recalls, score=tree_predictions, labels=y_test)
+tree_recalls
+
+# fit random forest
+forest_classifier <- randomForest(x=training_data_x, y=y_train$y_train, ntree=2, mtry=20)
+forest_predictions <- predict(forest_classifier, newdata=testing_data_x, type="response")
+forest_FPRs <- sapply(prob_thresholds, get_FPRs, score=forest_predictions, labels=y_test)
+forest_recalls <- sapply(prob_thresholds, get_recalls, score=forest_predictions, labels=y_test)
+
+
+###ROC curves all algorithms
+cols <- c("SVM" = "blue", "tree" = "red", "forest"="purple")
+ggplot() + geom_line(aes(x=FPRs, y=recalls, color="SVM"), linewidth=1.5) + 
+  geom_line(aes(x=tree_FPRs, y=tree_recalls, color="tree"), linetype=2, linewidth=1.5) +
+  geom_line(aes(x=forest_FPRs, y=forest_recalls, color="forest"), linetype=5, linewidth=1.5) + 
+  xlab("FPR") + ylab("TPR") + theme_bw(base_size=18) + 
+  geom_abline(linetype=4) + scale_color_manual(values = cols)
+
+###Tunning the decision tree
+test_x_y_union <- bind_cols(testing_data_x, y_test)
+train_x_y_union <- bind_cols(training_data_x, y_train)
+control <- rpart.control(minsplit = 10, minbucket = round(10/3), cp = 0,
+                         maxcompete = 4)
+fit <- rpart(y_train~., data = train_x_y_union, method = 'class', control = control)
+
+###Info decision tree tuned
+tuned_model <- predict(fit, newdata = test_x_y_union)
+summary(tuned_model)
+tree_predictions_fit <- predict(fit, newdata=testing_data_x, type="prob")[,2]
+tree_FPRs_fit <- sapply(prob_thresholds, get_FPRs, score=tree_predictions_fit, labels=y_test)
+tree_recalls_fit <- sapply(prob_thresholds, get_recalls, score=tree_predictions_fit, labels=y_test)
+ggplot() + geom_line(aes(x=tree_FPRs_fit, y=tree_recalls_fit), color='blue', linewidth=2) + 
+  xlab("FPR") + ylab("TPR") + 
+  theme_bw(base_size=18) + 
+  geom_abline(linetype=4, lionewidth=2)
+
+# Confusion Matrix
+val<-mean(tree_predictions_fit)
+resp<-ifelse(tree_predictions_fit>val,1,0)
+my_conf <- table(as.numeric(resp), y_test$y_test)
+my_conf
+accuracy_Test <- sum(diag(my_conf))/sum(my_conf)
+print(paste('Accuracy for test', accuracy_Test))
+
+

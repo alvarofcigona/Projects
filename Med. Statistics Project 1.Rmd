@@ -1,0 +1,98 @@
+---
+title: "Med. Statistics Project 1"
+author: "Alvaro Fernandez de la Cigoña"
+date: "2024-02-15"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{R}
+knitr::opts_chunk$set(echo = TRUE)
+library(meta)
+```
+
+
+
+From the several studies presented for meta-analysis three of them were chosen; Arifeen et al. (2012), Sazawal et al. (2016) and Semarau et al. (2016). From them I want to infer the neo-natal deaths with application of chlorhexidine. 
+The reason to choose this studies is that the three of them specify the non-use of cholorhexidine and not the application of a control or any other treatment. Like this I could get a straightforward result on the use or not use of chlorhexidine. Important to note that on the Rifeen et al. study, the raw representing the multiple applications has been dropped as single and multiple have similar estimates meaning that there is not much difference between single or multiple application.
+
+
+
+```{R}
+studies <-data.frame(Author=c("Arifeen_et_al.","Sazawal_et_al_total","Semarau_et_al"),
+                   Year=c(2012,2016,2016),
+                   A=c(212,189,282),
+                   B=c(9211,17826,18228),
+                   Ne=c(10329,18896,18510),
+                   C=c(275,221,263),
+                   D=c(10054,18675,19083),
+                   Nc=c(9423,18015,19346))
+studies
+```
+
+
+
+All three studies follow the methodology of "Cohort Studies", on which two groups are studied; one exposed to a risk factor and one without (group with cholorhexidine and group without cholorhexidine in this case). Using this studies we can infer the causality of anything, as it is being made here on the neo-natal deaths with cholorhexidine application. On Cohort studies we have the option of using Odds ratio or Relative Risk ratio...
+
+
+
+```{R}
+#Odds ratio calculation
+studies$OR <- (studies$A / studies$B) / (studies$C / studies$D)
+#Risk Ratio calculation
+studies$RR <- (studies$A / (studies$A + studies$B)) / (studies$C /(studies$C + studies$D))
+print(studies[,c("Author", "OR", "RR")])
+```
+
+
+
+The variances using both ratios has been calculated for each study...
+
+
+
+````{R}
+#variances OR
+studies$var_log_or <- (1/studies$A) - (1/studies$B) + (1/studies$C) +(1/studies$D)
+studies$var_or <- (log(studies$OR))^2 * studies$var_log_or
+
+#variances RR
+studies$var_log_rr <- (1/studies$A) - (1/studies$B) + (1/studies$C) +(1/studies$D)
+studies$var_rr <- (log(studies$RR))^2 * studies$var_log_rr
+
+print(studies[,c("Author", "OR", "var_or", "RR", "var_rr")])
+```
+
+
+
+```{R}
+#meta-analysis
+m <- metabin(A, Ne, C, Nc, studlab = paste(Author,
+                                                      Year), sm = "RR", method = "I", data = studies)
+summary(m)
+```
+
+
+
+The risk ratio (RR) estimate for Arifeen et al. (2012) indicates a statistically significant reduction in the risk of neonatal deaths associated with chlorhexidine application, with an RR of 0.7033. On the same trend, Sazawal et al. (2016) also reports a significant decrease in the risk of neonatal deaths with chlorhexidine application, with an RR of 0.8153. While Semarau et al. (2016), show a non-significant trend towards increased risk of neonatal deaths with chlorhexidine application, with an RR of 1.1207.
+The summary RR estimate across all studies, using the common effect model, suggests a statistically significant reduction in the risk of neonatal deaths associated with chlorhexidine application, with an RR of 0.8752. The RR of the random effect model has really close RR (0.8646) but a wider C.I. suggesting that the right model would be the common effect one.
+Regarding the heterogenity of the studies, the I^2 value indicates substantial heterogenity (86.5%). confirmed by the Test for heterogenity with a p-value of 0.0006. This suggests that the variability in the effect of the estimates thorough the studies is due to actual differences between the studies (it could be studying design, population, characteristics...). As it can be seen visually on the forest plot the study that differes the most and causes this heterogenity  is Semarau et al.
+
+
+
+```{R}
+forest(m, layout = "JAMA")
+```
+
+
+All the results mentioned before can be visually seen on the forest of the meta-analysis.
+
+
+As an overall conclusion, our meta-analysis of the three studies shows the effectiveness of chlorhexidine application in reducing the risk of neonatal deaths. Although, there is a high heterogeneity caused by the results of the Semarau et al. study. Therefore, further research should be implemented in order to properly asses the association and possible benefits of the application of chlorhexidine.
+
+
+
+REFERENCES
+-Arifeen, Shams El, Luke C. Mullany, Rasheduzzaman Shah, Ishtiaq Mannan, Syed M. Rahman, M. Radwanur R. Talukder, Nazma Begum, et al. 2012. “The effect of cord cleans- ing with chlorhexidine on neonatal mortality in rural Bangladesh: A community-based, cluster-randomised trial.” The Lancet 379 (9820): 1022–28. https://doi.org/10.1016/ S0140-6736(11)61848-5.
+-Sazawal, Sunil, Usha Dhingra, Said M. Ali, Arup Dutta, Saikat Deb, Shaali M. Ame, Mkasha H. Mkasha, Ashish Yadav, and Robert E. Black. 2016. “Efficacy of chlorhexidine application to umbilical cord on neonatal mortality in Pemba, Tanzania: a community- based randomised controlled trial.” The Lancet Global Health 4 (11): e837–44. https: //doi.org/10.1016/S2214-109X(16)30223-6.
+-Semrau, Katherine E. A., Julie Herlihy, Caroline Grogan, Kebby Musokotwane, Kojo Yeboah- Antwi, Reuben Mbewe, Bowen Banda, et al. 2016. “Effectiveness of 4% chlorhexidine umbilical cord care on neonatal mortality in Southern Province, Zambia (ZamCAT): a cluster-randomised controlled trial.” The Lancet Global Health 4 (11): e827–36. https://doi.org/10.1016/S2214-109X(16)30215-7.

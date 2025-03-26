@@ -1,0 +1,301 @@
+---
+title: "Project 1"
+author: "Beth Williamson, Natsani Dube, Alvaro Fernandez De La Cigona Barreiro"
+date: "29/01/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+remotes::install_github("chrissuthy/statsecol")
+library(statsecol)
+data(wildebeest)
+```
+
+
+# Simulating From A State Space Model with 4 Age Classes
+
+## Question 1
+
+- Choose appropriate distributions for the stochastic components of the model.
+
+An appropriate distribution for the survival process of the model is binomial because there's a probability of surviving for each age class and surviving and not surviving is the binary outcome we are looking at.
+An appropriate model for the births process of the model is poisson because the poisson distribution is used to model the number of events in a time interval, and in this case, the event will be births, and we have a given birth rate for each age class that give birth. 
+An appropriate model for the observation process is binomial because there is a given probability of detecting the individuals of all ages and the binary outcome is detecting individuals and not detecting them.
+
+- Write an R script to simulate dynamics from this model:
+
+```{r}
+#Species with 4 age classes and 3 sub-processes: survival, ageing, reproduction (BAS)
+
+#A function to simulate stochastic BAS dynamics 
+bas_ssm <- function(n0, par_phi, par_rho, nyears, p){
+
+  #initiate matrices
+  n <- matrix(NA,nrow=4,ncol=nyears)
+  y <- matrix(NA,nrow=4,ncol=nyears)
+  
+  #first column of abundances
+  n[,1] <- n0
+  
+  #calculate first column of observations
+  y[1,1] <- rbinom(n=1, n[1,1], p=p)
+  y[2,1] <- rbinom(n=1, n[2,1], p=p)
+  y[3,1] <- rbinom(n=1, n[3,1], p=p)
+  y[4,1] <- rbinom(n=1, n[4,1], p=p)
+    
+  #sub-processes
+  for(i in 2:nyears){ #start at t=2
+    
+    #survival
+    u.s.1 <- rbinom(n=1, size=n[1,i-1], prob=par_phi[1])
+    u.s.2 <- rbinom(n=1, size=n[2,i-1], prob=par_phi[2])
+    u.s.3 <- rbinom(n=1, size=n[3,i-1], prob=par_phi[3])
+    u.s.4 <- 0 #fourth year individuals always die
+  
+    #aging: each class moves on to the next class
+    u.a.1 <- 0
+    u.a.2 <- u.s.1
+    u.a.3 <- u.s.2 
+    u.a.4 <- u.s.3
+  
+    #birth
+    u.b.1 <- u.a.1 + rpois(n=1, lambda=u.a.2*par_rho[1]) + rpois(n=1, lambda=u.a.3*par_rho[2])
+    u.b.2 <- u.a.2
+    u.b.3 <- u.a.3
+    u.b.4 <- u.a.4
+  
+    #update n
+    n[1,i] <- u.b.1  
+    n[2,i] <- u.b.2
+    n[3,i] <- u.b.3
+    n[4,i] <- u.b.4
+    
+    #Observations
+    y[1,i] <- rbinom(n=1, n[1,i], p=p)
+    y[2,i] <- rbinom(n=1, n[2,i], p=p)
+    y[3,i] <- rbinom(n=1, n[3,i], p=p)
+    y[4,i] <- rbinom(n=1, n[4,i], p=p)
+  }
+  return(data.frame(Year = 1:nyears,
+                    Abundance = c(n[1,],y[1,],n[2,],y[2,],n[3,],y[3,],n[4,],y[4,]),
+                    Type = rep(c("State","Observation"),each=nyears,times=4),
+                    Age_Class = rep(c("1st","2nd", "3rd", "4th"),each=2*nyears)))
+}
+
+```
+
+- Simulate and plot 25 years of age-specific population dynamics and observation:
+
+```{r, fig.align='center'}
+#set parameters
+nyears <- 25
+n0 <- c(150,70,50,30) #initial age-specific population sizes
+par_phi <- c(0.45, 0.7, 0.7, 0) #survival probabilities
+par_rho <- c(0.9,1.9) #reproduction rates
+p <- 0.5 #probability of detecting individuals
+
+set.seed(1234)
+bas_dynamics <- bas_ssm(n0 = n0,
+                        par_phi = par_phi, 
+                        par_rho = par_rho, 
+                        nyears = nyears,
+                        p=p)
+
+ggplot(bas_dynamics, aes(x=Year,y=Abundance, group=Type, color=Type)) +
+  geom_line(linewidth=1) +
+  scale_size_manual(values=c(Observation=0.5, Age_Class=0.5)) +
+  scale_color_manual(values=c("grey", "blue")) +
+  facet_wrap(.~Age_Class) +
+  theme_bw()
+```
+
+# Biological Interpretation of A Model
+
+## Question 2
+
+- If illegal harvesting occurred before growth, the model would be:
+
+$$N_t|N_{t-1} = N_{t-1}+r_t(N_{t-1}-c_{t-1})(1-\frac{N_{t-1}-c_{t-1}}{K_t})$$
+
+
+- Does it make more sense to model $r_t$ as a function of rainfall in time $t$ or time $t-1$? 
+
+We think that it makes more sense to model the growth rate, $r_t$, as a function of rainfall in time $t-1$ because it makes sense that the growth rate in the current year would be affected by rainfall in the previous year. There is most likely a time lag, meaning that there is a delay in the wildebeest's growth rate's response to the amount of rainfall. Modeling $r_t$ as a function of rainfall in time $t-1$ assumes that it takes time for the wildebeest population to react to environmental changes.
+
+
+
+- Does it make more sense to model $K_t$ as a function of rainfall in time $t$ or time $t-1$? 
+
+Similar to above, we think that it makes more sense to model the carrying capacity, $K_t$, as a function of rainfall in time $t-1$ because we are assuming that it takes time for the wildebeest population to adjust to environmental changes. Carrying capacity is most likely affected by the change in rainfall in the previous year because it will take time for the change in rainfall to affect the carrying capacity. 
+
+# Fitting and Comparing Models
+
+## Question 3
+
+- Compare the estimates of $\alpha_1$ between the two models and briefly interpret the results from this analysis and the comparison. Comparing the two models using AIC, which is the preferred model, and why?
+
+```{r}
+#time varying growth rate model
+rain_rK_nll <- function(pars, years, removals, Nhat, SEhat, rain, model=1, type="nll"){
+  
+  #parameter set up
+  N0 <- exp(pars[1])
+  N <- numeric(years)
+  r <- numeric(years)
+  k <- numeric(years)
+  
+  N[1] <- N0
+  r[1] <- NA
+  k[1] <- NA
+  
+  #both models-temporal variation in R and K is constant
+  if(model == 1){ #growth rate function of R_t
+    if(length(pars)!=4){stop("par should have 4 values")}
+    r[2:years] <- exp(pars[2]+pars[3]*rain[2:years])
+    k <- rep(exp(pars[4]),years-1)
+  }
+  if(model == 2){ #growth rate function of R_t-1
+    if(length(pars)!=4){stop("par should have 4 values")}
+    r[2:years] <- exp(pars[2]+pars[3]*rain[1:years-1])
+    k <- rep(exp(pars[4]),years-1)
+  }
+
+  #generate population dynamics:
+  for(i in 2:years){
+    N[i]=N[i-1] + r[i] * (N[i-1]-removals[i-1]) * (1-((N[i-1]-removals[i-1])/k[i])) 
+  }
+  
+  negloglik <- -sum(dnorm(Nhat,N,SEhat,log=TRUE), na.rm=TRUE)
+  
+  #what should be returned? 
+  if(type=="nll"){  return(negloglik)}
+  if(type=="proj"){ return(N)}
+}
+
+
+yrs <- nrow(wildebeest)
+rmv <- wildebeest$Catch
+Nhat <- wildebeest$Nhat
+SEhat <- wildebeest$sehat
+rain <- wildebeest$rain
+
+#fit the 2 models:
+fit_1 <- optim(par = c(log(0.1),log(0.25),0, 0), fn = rain_rK_nll, years = yrs, 
+               removals = rmv, Nhat = Nhat, SEhat = SEhat, rain = rain, model=1)
+fit_2 <- optim(par = c(log(0.1),log(0.25),0, 0), fn = rain_rK_nll, years = yrs, 
+               removals = rmv, Nhat = Nhat, SEhat = SEhat, rain = rain, model=2)
+
+#compare alphas
+alpha1 <- round(exp(fit_1$par[3]),3)
+alpha2 <- round(exp(fit_2$par[3]),3)
+
+alphas <- data.frame(
+            Model = c("r(t)k(.)","r(t-1)k(.)"),
+            Alpha_1 = c(alpha1,alpha2))
+
+alphas
+
+#Compute the AIC:
+aic1 <- 2*fit_1$value + 2*length(fit_1$par)
+aic2 <- 2*fit_2$value + 2*length(fit_2$par)
+
+
+aictab <- data.frame(
+            Model = c("r(t)k(.)","r(t-1)k(.)"),
+            AIC = c(aic1,aic2),
+            dAIC = c(aic1,aic2)-min(c(aic1,aic2)))
+aictab[order(aictab$dAIC),]
+
+
+```
+The estimate for $\alpha_1$ in real scale for the model where $r_t$ is a function of rainfall in time $t$ is 3.13, while the estimate for $\alpha_1$ in real scale for the model where $r_t$ is a function of rainfall in time $t-1$ is 2.62. Both of these estimates are positive, indicating that rainfall increases the growth rate. The estimates in both models are somewhat close to each other, meaning that changing between modeling rainfall with $t$ and $t-1$ doesn't make a huge difference in estimating $\alpha_1$. 
+The AIC for the model where $r_t$ is a function of rainfall in time $t$ is -20.26, while the AIC for the model where $r_t$ is a function of rainfall in time $t-1$ is -18.24. The model where $r_t$ is a function of rainfall in time $t$ has a slightly lower AIC, and thus, this model is slightly better. 
+
+- Compare the estimates of $\beta_1$ between the two models and briefly interpret the results from this analysis and the comparison. Comparing the two models using AIC, which is the preferred model, and why?
+
+
+```{r}
+#time varying carrying capacity model
+rain_rK_nll <- function(pars, years, removals, Nhat, SEhat, rain, model=1, type="nll"){
+  
+  #parameter set up
+  N0 <- exp(pars[1])
+  N <- numeric(years)
+  r <- numeric(years)
+  k <- numeric(years)
+  
+  N[1] <- N0
+  r[1] <- NA
+  k[1] <- NA
+  
+  #both models-temporal variation in K and R is constant
+  if(model == 1){ #carrying capacity function of R_t
+    if(length(pars)!=4){stop("par should have 4 values")}
+    r[2:years] <- rep(exp(pars[2]),years-1)
+    k[2:years] <- exp(pars[3]+pars[4]*rain[2:years])
+  }
+  if(model == 2){ #carrying capacity function of R_t-1
+    if(length(pars)!=4){stop("par should have 4 values")}
+    r[2:years] <- rep(exp(pars[2]),years-1)
+    k[2:years] <- exp(pars[3]+pars[4]*rain[1:years-1])
+  }
+
+  #generate population dynamics:
+  for(i in 2:years){
+    N[i]=N[i-1] + r[i] * (N[i-1]-removals[i-1]) * (1-((N[i-1]-removals[i-1])/k[i])) 
+  }
+  
+  negloglik <- -sum(dnorm(Nhat,N,SEhat,log=TRUE), na.rm=TRUE)
+  
+  #what should be returned? 
+  if(type=="nll"){  return(negloglik)}
+  if(type=="proj"){ return(N)}
+}
+
+
+yrs <- nrow(wildebeest)
+rmv <- wildebeest$Catch
+Nhat <- wildebeest$Nhat
+SEhat <- wildebeest$sehat
+rain <- wildebeest$rain
+
+#fit the 2 models:
+fit_1 <- optim(par = c(log(0.1),log(0.25),log(1.5),0), fn = rain_rK_nll, years = yrs, 
+               removals = rmv, Nhat = Nhat, SEhat = SEhat, rain = rain, model=1)
+fit_2 <- optim(par = c(log(0.1),log(0.25),log(1.5),0), fn = rain_rK_nll, years = yrs, 
+               removals = rmv, Nhat = Nhat, SEhat = SEhat, rain = rain, model=2)
+
+#compare betas
+beta1 <- round(exp(fit_1$par[4]),3)
+beta2 <- round(exp(fit_2$par[4]),3)
+
+betas <- data.frame(
+            Model = c("r(.)k(t)","r(.)k(t-1)"),
+            Beta_1 = c(beta1,beta2))
+
+betas
+
+#Compute the AIC:
+aic1 <- 2*fit_1$value + 2*length(fit_1$par)
+aic2 <- 2*fit_2$value + 2*length(fit_2$par)
+
+
+aictab <- data.frame(
+            Model = c("r(.)k(t)","r(.)k(t-1)"),
+            AIC = c(aic1,aic2),
+            dAIC = c(aic1,aic2)-min(c(aic1,aic2)))
+aictab[order(aictab$dAIC),]
+
+```
+
+The estimate for $\beta_1$ in real scale for the model where $k_t$ is a function of carrying capacity in time $t$ is 2.155, while the estimate for $\beta$ in real scale for the model where $k_t$ is a function of carrying capacity in time $t-1$ is 1.331. Both of these estimates are positive, indicating that rainfall increases carrying capacity. $beta_1$ is slightly larger when using carrying capacity as a function of $t$. The estimates in both models are somewhat close to each other, meaning that changing between modeling carrying capacity with $t$ and $t-1$ doesn't make a huge difference in estimating $\beta_1$.
+The AIC for the model where $k_t$ is a function of rainfall in time $t$ is -19.85, while the AIC for the model where $k_t$ is a function of rainfall in time $t-1$ is -15.41. These AIC values are somewhat close to each other. The model where $k_t$ is a function of rainfall in time $t$ has a slightly lower AIC, and thus, this model is slightly better. 
+In the time varying growth rate models and the time varying carrying capacity models, the models where $r_t$ and $k_t$ are modeled as a function of rain in the same year, $t$, are the better models. 
+
+
+
+
+
+

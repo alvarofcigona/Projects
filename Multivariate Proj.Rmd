@@ -1,0 +1,263 @@
+---
+title: "Multivariate Analysis Project"
+author: "Alvaro Fernandez de la Cigoña"
+date: "2024-03-20"
+output: html_document
+---
+
+```{R}
+library(jpeg)
+library(colordistance)
+library(ggplot2)
+library(ggmap)
+library(factoextra) 
+library(cluster) 
+library(scatterplot3d)
+library(corrplot)
+library(ggcorrplot)
+```
+
+```{R}
+raw_data <- read.csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/Country-data.csv.xls")
+
+#mising values
+which_na <- sapply(1:nrow(raw_data), function(i) any(raw_data[i,] == -999))
+print(which_na)
+# Remove those rows from data
+data <- raw_data[!which_na,]
+
+head(data)
+str(data)
+
+#r Specific relatinoship between two target variables
+plot_two_var <- ggplot(data, aes(health, imports)) +
+    geom_point()
+print(plot_two_var)
+
+#on the log scale
+plot_twp_log <- plot(data$health, data$imports, log = "xy",
+     xlab = "health", ylab = "imports")
+print(plot_twp_log)
+
+#Relationship with exports 
+scatt_with_exp <- scatterplot3d(x = data$health, y = data$imports, 
+              z = data$exports, angle = 30)
+print(scatt_with_exp)
+
+#matrix and correlation all variables
+rownames(data) <- data[,1]
+data <- as.data.frame(scale(data[,-1], center = TRUE))
+head(data)
+pairs(data)
+cor(data)
+
+data_mat <- as.matrix(data)
+corr_data_mat <- ggcorrplot::ggcorrplot(data_mat)
+print(corr_data_mat)
+
+
+```
+
+Distances 
+
+```{R}
+
+D <- dist(data)
+D_mat <- as.matrix(D)
+
+#Min. and Max. Distances
+min_dist <- min(D_mat[which(D_mat > 0)])
+which_min <- which(D_mat == min_dist, arr.ind = TRUE)
+max_dist <- max(D_mat)
+which_max <- which(D_mat == max_dist, arr.ind = TRUE)
+
+```
+
+
+PCA
+
+```{R}
+#Covariance matrix
+Sigma <- cov(data_mat)
+
+#eigenvalues and eigenvectors
+eig <- eigen(Sigma)
+
+#Scores
+Z <- data_mat %*% eig$vectors
+head(Z)
+
+# Plot PC1 vs PC2
+plot(Z[,1:2], asp = 1, xlab = "PC1", ylab = "PC2")
+abline(v = 0, lty = 2)
+abline(h = 0, lty = 2)
+
+#Principal component variances
+pc_var <- eig$values
+
+# Proportion of variance explained
+pc_prop_var <- pc_var/sum(pc_var)
+
+plot(pc_prop_var, xlab = "principal component index", 
+     ylab = "proportion of variance explained", 
+     main = "scree plot")
+
+# Cumulative proportion of variance explained
+pc_cumul_prop_var <- cumsum(pc_prop_var)
+
+plot(pc_cumul_prop_var, xlab = "principal component index", 
+     ylab = "cumulative proportion of variance explained")
+abline(h = 0.9)
+
+# Apply PCA using built-in function
+pca <- prcomp(data)
+
+# List of elements of PCA object
+names(pca)
+
+# Eigenvectors returned by eigen
+eig$vectors
+
+# Eigenvectors returned by prcomp
+pca$rotation
+
+# Biplots
+biplot(pca)
+factoextra::fviz_pca_biplot(pca, repel = TRUE)
+factoextra::fviz_pca_var(pca)
+
+
+# Scatterplot of first 3 PCs 
+plotly::plot_ly(as.data.frame(pca$x), x = ~PC1, y = ~PC2, z = ~PC3, 
+                colors = c("firebrick", "royalblue"),
+                size = 0.1)
+
+```
+
+Multi Dimesnional Scaling
+
+```{R}
+#Set diagonal elements of distance matrix to zero
+diag(D_mat) <- 0
+
+# Apply classical MDS
+mds1 <- cmdscale(d = D_mat, eig = TRUE)
+
+# Print eigenvalues
+mds1$eig
+round(mds1$eig,3)
+
+# Goodness of fit criterion based on absolute value (explicar si no hay valores negativos q es eculcedian y se puede hacer el classical)
+cumsum(abs(mds1$eig/sum(abs(mds1$eig))))
+
+# Plot 2d classical MDS configuration
+cmd_2d <- mds1$points
+plot(cmd_2d, type = "n", asp = 1, xlab = "MDS dim 1", ylab = "MDS dim 2")
+text(cmd_2d, labels = rownames(cmd_2d))
+
+# Compute minimum spanning tree (to check for distortions)
+tree <- ape::mst(D_mat)
+
+# Create plot
+plot(cmd_2d, type = "p", asp = 1, 
+     xlab = "MDS dim 1", ylab = "MDS dim 2", xlim=c(-0.6,0.4),ylim=c(-0.3,0.3))
+
+# Loop over pictures
+for(i in 1:nrow(tree)) {
+    # Identify adjacent pictures
+    which_adj <- which(tree[i,] == 1)
+    
+    # Add segment between pictures i and j if adjacent
+    segments(x0 = cmd_2d[i,1], 
+             y0 = cmd_2d[i,2], 
+             x1 = cmd_2d[which_adj,1], 
+             y1 = cmd_2d[which_adj,2], 
+             col = "grey")
+}
+# Add labels for picture names
+text(cmd_2d+0.025, labels = rownames(cmd_2d))
+
+
+# Apply non-metric MDS
+mds2 <- MASS::isoMDS(D)
+mds2
+
+# Get Euclidean distance matrices from MDS configurations
+D2 <- as.matrix(dist(mds1$points)) 
+D3 <- as.matrix(dist(mds2$points))
+# Stress for classical MDS solution
+sum((D_mat - D2)^2/sum(D_mat^2))
+# Stress for non-metric MDS solution
+sum((D_mat - D3)^2 / sum(D_mat^2))
+
+# Plot 2d classical MDS configuration
+cmd2_2d <- mds2$points
+plot(cmd2_2d, type = "n", asp = 1, xlab = "MDS dim 1", ylab = "MDS dim 2")
+text(cmd2_2d, labels = rownames(cmd2_2d))
+
+
+# Create plot
+plot(cmd2_2d, type = "p", asp = 1, 
+     xlab = "MDS dim 1", ylab = "MDS dim 2", xlim=c(-0.6,0.4),ylim=c(-0.3,0.3))
+```
+
+
+Cluster
+
+```{R}
+
+# Create data set for maps
+map_data <- data.frame(country = rownames(data))
+
+# Scatterplot matrix
+pairs(data, pch = 20, cex = 0.5)
+
+# Plot health vs imports to identify outliers
+plot(data$health, data$imports, type = "n", asp = 1) 
+text(data$health, data$imports, labels = rownames(data))
+
+# K-means with 2, 3, 4 and 5 clusters
+km2 <- kmeans(data, centers = 2, nstart = 50) 
+km3 <- kmeans(data, centers = 3, nstart = 50) 
+km4 <- kmeans(data, centers = 4, nstart = 50)
+km5 <- kmeans(data, centers = 5, nstart = 50)
+km6 <- kmeans(data, centers = 6, nstart = 50)
+
+#aqui señlccinar numeros de cluster buenos para el sigioente codifgo abajo
+# Colour palette
+pal <- c("royalblue", "firebrick", "seagreen", "gold", "black", "grey")
+# Scatterplot matrices coloured by clusters
+pairs(data, pch = 20, cex = 0.8, col = pal[km3$cluster])
+pairs(data, pch = 20, cex = 0.8, col = pal[km4$cluster])
+pairs(data, pch = 20, cex = 0.8, col = pal[km5$cluster])
+pairs(data, pch = 20, cex = 0.8, col = pal[km6$cluster])
+
+
+
+# Criteria to select number of clusters
+fviz_nbclust(x = data, FUNcluster = kmeans, method = "silhouette", k.max = 20)
+
+# Create silhouette object(to investigate further the stricture of the clusters)
+sil_5 <- silhouette(x = km5$cluster, dist = dist(data))
+sil_2 <- silhouette(x = km2$cluster, dist = dist(data))
+sil_6 <- silhouette(x = km6$cluster, dist = dist(data))
+# Silhouette plot
+fviz_silhouette(sil_5) + scale_fill_manual(values = pal) + scale_color_manual(values = pal)
+fviz_silhouette(sil_2) + scale_fill_manual(values = pal) + scale_color_manual(values = pal)
+fviz_silhouette(sil_6) + scale_fill_manual(values = pal) + scale_color_manual(values = pal)
+
+#Hierarchical cluster
+
+# Apply complete linkage
+hc1 <- hclust(D, method = "complete")
+# Plot dendrogram
+fviz_dend(hc1)
+
+#single linkage hierachicsl
+# Apply single linkage
+hc2 <- hclust(D, method = "single")
+# Plot dendrogram
+fviz_dend(hc2)
+
+```
+
