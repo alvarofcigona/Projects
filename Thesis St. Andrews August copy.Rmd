@@ -1,0 +1,1067 @@
+---
+title: "Thesis St. Andrews"
+author: "Alvaro Fernandez de la Cigoña"
+date: "2024-06-19"
+output: html_document
+---
+Libraries
+
+```{r, include=FALSE}
+library(readr)
+library(rstan)
+library(dplyr)
+library(tidyr)
+library(brms)
+library(rugarch)
+library(mgcv)
+library(caTools)
+library(caret)
+library(loo)
+library(lubridate)
+library(knitr)
+```
+
+
+Data Preparation
+```{r}
+# Loading data
+blossoms <- read_csv("/Users/alvarofernandezdelacigonabarreiro/Documents/R St. Andrews/sakura_first_bloom_dates.csv")
+head(blossoms)
+
+#Dropping average column and notes
+blossoms <- blossoms %>% select(-`30 Year Average 1981-2010`, -Notes)
+
+#Reshaping format
+reshaped_data <- blossoms %>%
+  pivot_longer(cols = starts_with('1953'),  
+names_to = "Year",
+values_to = "Value")
+
+head(reshaped_data)
+
+# Dropping the 'Year' and 'Value' columns
+reshaped_data <- reshaped_data %>% select(-Year, -Value)
+
+#Dropping Wakkanai row because of NAs
+reshaped_data <- reshaped_data %>% filter(!(`Site Name`%in% c("Wakkanai", "Rumoi")))
+
+# Function to replace NA 
+replace_na_with_previous <- function(row) {
+  for (i in seq_along(row)) {
+   if (is.na(row[i])) {
+     row[i] <- row[i-1]
+    }
+  }
+  return(row)
+}
+
+# Rellenar valores NA con el valor anterior en cada fila para las columnas de años
+data_corrected <- reshaped_data %>%
+  fill(`1954`:`2023`, .direction = "down")
+
+
+# Viewing the corrected data
+head(data_corrected)
+
+# Converting date columns to numeric day of the year
+data_numeric <- data_corrected %>%
+  mutate(across(matches("^(19|20)\\d{2}$"), ~ yday(as.Date(.))))
+
+# Creating a custom dataset to pass to brms
+data_timeser <- data_numeric %>%
+  pivot_longer(cols = matches("^(19|20)\\d{2}$"), names_to = "Year", values_to = "NumericDate") %>%
+  mutate(Year = as.numeric(Year))
+
+# Checking for duplicate year values within each group
+duplicates <- data_timeser %>%
+  group_by(`Site Name`, Year) %>%
+  filter(n() > 1)
+
+if (nrow(duplicates) > 0) {
+  print("Duplicates found within groups:")
+  print(duplicates)
+}
+
+data <- data_timeser
+head(data)
+
+
+data <- data %>%
+  rename(SiteName = `Site Name`)
+
+
+```
+Visualization Time Series (hacerlo de solo un site mejor y ponerlo como ejemplo!!!)
+
+```{R}
+plot.ts(data$NumericDate)
+
+acf(data_ar2$NumericDate)
+
+```
+
+
+Data handling  
+
+
+```{R}
+# Ensure the data is sorted by location and year
+data <- data %>%
+  arrange(SiteName,Year)
+
+# Create lagged variables for AR(2) model
+data_ar2 <- data %>%
+  group_by(SiteName) %>%
+  mutate(Value_lag1 = lag(NumericDate, 1),
+         Value_lag2 = lag(NumericDate, 2)) %>%
+  ungroup() %>%
+  drop_na(c(NumericDate, Value_lag1, Value_lag2)) 
+
+# Check for any remaining missing values
+if (any(is.na(data_ar2))) {
+  stop("There are still missing values in the data after creating lagged variables.")
+}
+
+# For short-term predictions 
+# Leave the last 100 rows for validation
+data_short_term <- data_ar2[1:(nrow(data_ar2) - 100), ]  
+
+# For long-term predictions 
+# Only the last 300 rows fortraining and validation
+data_long_term <- data_ar2[(nrow(data_ar2) - 300):nrow(data_ar2), ] 
+
+```
+
+
+Data Partitioning (80/20)
+
+
+```{R}
+data_proportion <- 0.8
+data_partitioning <- floor(data_proportion * nrow(data))
+
+
+# Dividir conjunto de datos completo de forma aleatoria
+set.seed(123)  
+split <- sample.split(data$SiteName, SplitRatio = data_proportion)
+training <- subset(data, split == TRUE)
+test <- subset(data, split == FALSE)
+
+# Dividir data_ar2 de forma similar
+split_ar2 <- sample.split(data_ar2$SiteName, SplitRatio = data_proportion)
+training_ar2 <- subset(data_ar2, split_ar2 == TRUE)
+test_ar2 <- subset(data_ar2, split_ar2 == FALSE)
+
+```
+
+
+Cross Validation functions for different scenarios
+
+
+```{R}
+## Long-Term Prediction Cross-Validation
+long_term_cv <- function(data, model_formula, forecast_horizon, family, chains = 2, iter = 2000, warmup = 1000) {
+  training_long_term <- subset(data, Year <= max(Year) - forecast_horizon)
+  validation_long_term <- subset(data, Year > max(training_long_term$Year))
+}
+  
+
+  ## Short-Term Prediction Cross-Validation
+short_term_cv <- function(data, model_formula, forecast_horizon, family, chains = 2, iter = 2000, warmup = 1000) {
+  training_short_term <- subset(data, Year <= max(Year) - forecast_horizon)
+  validation_short_term <- subset(data, Year > max(training_short_term$Year) & Year <= max(training_short_term$Year) + forecast_horizon)
+}
+
+
+```
+
+
+Data partitioning
+
+
+```{R}
+#Long-Term scenario
+long_term_partition <- function(data, forecast_horizon) {
+  # Training set: All data up to the forecast_horizon before the latest year
+  training_long_term <- subset(data, Year <= max(Year) - forecast_horizon)
+  
+  # Validation set: Data within the forecast_horizon (last 6 months)
+  validation_long_term <- subset(data, Year > max(training_long_term$Year))
+  
+  return(list(training = training_long_term, validation = validation_long_term))
+}
+
+
+long_term_data <- long_term_partition(data_ar2, forecast_horizon = 0.5)  # 6 months = 0.5 years
+training_long_term <- long_term_data$training
+validation_long_term <- long_term_data$validation
+
+#Short-Term Scenario
+# Using the last 2 years for validation
+short_term_partition <- function(data, recent_years) {
+  # Training set: Using all data except the last 'recent_years' years
+  training_short_term <- subset(data, Year <= max(Year) - recent_years)
+  
+  # Validation set: Using last 'recent_years' of data
+  validation_short_term <- subset(data, Year > max(training_short_term$Year))
+  
+  return(list(training = training_short_term, validation = validation_short_term))
+}
+
+short_term_data <- short_term_partition(data_ar2, recent_years = 2)
+training_short_term <- short_term_data$training
+validation_short_term <- short_term_data$validation
+```
+
+
+Data Partitioning using K-fold
+```{R}
+
+
+# For short-term predictions 
+# Leave the last 100 rows for validation
+data_short_term <- data_ar2[1:(nrow(data_ar2) - 100), ]  
+
+# For long-term predictions 
+# Only the last 300 rows fortraining and validation
+data_long_term <- data_ar2[(nrow(data_ar2) - 300):nrow(data_ar2), ] 
+
+# Short-Term k-Fold Cross Validation
+kst <- 5
+num_observations_short <- nrow(data_short_term)
+fold_size_short <- floor(num_observations_short / kst)
+
+for (i in 1:kst) {
+  train_end <- max(1, (i * fold_size_short))
+  validation_start <- min(num_observations_short, train_end + 1)
+  validation_end <- min(num_observations_short, (i + 1) * fold_size_short)
+  
+  training_set_kfold_short_term <- data_short_term[1:train_end, ]
+  validation_set_kfold_short_term <- data_short_term[validation_start:validation_end, ]
+}
+
+# Long-Term k-Fold Cross Validation
+k <- 5
+num_observations_long <- nrow(data_long_term)
+fold_size_long <- floor(num_observations_long / k)
+
+for (i in 1:k) {
+  train_end <- max(1, (i * fold_size_long))
+  validation_start <- min(num_observations_long, train_end + 1)
+  validation_end <- min(num_observations_long, (i + 1) * fold_size_long)
+  
+  training_set_kfold_long_term <- data_long_term[1:train_end, ]
+  validation_set_kfold_long_term <- data_long_term[validation_start:validation_end, ]
+}
+
+
+```
+
+
+AR(1) Model BRMS
+
+
+```{r, include=FALSE}
+# Fitting the AR(1) model
+ar1_model <- brm(
+  formula = NumericDate ~ Value_lag1 + (1 | SiteName),
+  data = training_ar2,
+  family = gaussian(),
+  chains = 2, 
+  iter = 2000,
+  warmup = 500,
+  control = list(adapt_delta = 0.95)
+)
+
+# Summarizing the model
+summary(ar1_model)
+
+# Predicting for 2033
+predictions_AR1 <- posterior_predict(ar1_model, newdata = test_ar2, allow_new_levels =TRUE)
+
+# Converting numeric date back to Date
+predicted_date_2033_AR1 <- as.Date(round(mean(predictions_AR1)))
+
+# Printting the predicted date for 2033
+print(predicted_date_2033_AR1)
+
+
+
+##Model evaluation (LOO-CV)
+
+# Extracting log-likelihood values
+log_lik_AR1 <- log_lik(ar1_model)
+
+# Calculating relative effective sample sizes
+r_eff_AR1 <- relative_eff(exp(log_lik_AR1), chain_id = rep(1:4, each = nrow(log_lik_AR1) / 4))
+
+# Performing LOO-CV with r_eff
+loo_result_AR1 <- loo(log_lik_AR1, r_eff = r_eff_AR1)
+
+# Printing the LOO-CV results
+print(loo_result_AR1)
+
+
+##Model evaluation (RMS)
+
+#Predictions on training data
+predictions_ar1 <- posterior_predict(ar1_model, summary = FALSE)
+
+#mean of predicted values for each point
+predicted_means_ar1 <- rowMeans(predictions_ar1)
+
+
+#Calculationg RMS
+rmse_ar1 <- calculate_rmse_ar1(training_ar2$NumericDate, predicted_means_ar1)
+print(paste("RMSE for the AR(1) model:", rmse_ar1))
+
+```
+
+
+AR(1) Model on different scenarios
+
+
+```{R}
+# Fitting the model
+  AR1_long_term <- brm(
+    formula = NumericDate ~ Value_lag1 + (1 | SiteName),
+    data = training_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar1_long_term <- posterior_predict(AR1_long_term, newdata = validation_long_term)
+  predicted_means_ar1_long_term <- rowMeans(predictions_ar1_long_term)
+  
+  rmse_ar1_long_term <- sqrt(mean((validation_long_term$NumericDate - predicted_means_ar1_long_term)^2))
+  
+  # LOO-CV
+  loo_result_ar1_long_term <- loo(AR1_long_term)
+  
+  list(model = AR1_long_term, rmse = rmse_ar1_long_term, loo = loo_result_ar1_long_term)
+
+
+  
+  # Fitting the model
+  AR1_short_term <- brm(
+    formula = NumericDate ~ Value_lag1 + (1 | SiteName),
+    data = training_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar1_short_term <- posterior_predict(AR1_short_term, newdata = validation_short_term)
+  predicted_means_ar1_short_term <- rowMeans(predictions_ar1_short_term)
+  
+  rmse_ar1_short_term <- sqrt(mean((validation_short_term$NumericDate - predicted_means_ar1_short_term)^2))
+  
+  # LOO-CV
+  loo_result_ar1_short_term <- loo(AR1_short_term)
+  
+  list(model = AR1_short_term, rmse = rmse_ar1_short_term, loo = loo_result_ar1_short_term)
+
+```
+
+
+AR(1) Model on different scenarios (K-fold)
+
+
+```{R}
+# Fitting the model
+  AR1_long_term_kfold <- brm(
+    formula = NumericDate ~ Value_lag1 + (1 | SiteName),
+    data = training_set_kfold_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar1_long_term_kfold <- posterior_predict(AR1_long_term_kfold, newdata = validation_set_kfold_long_term, allow_new_levels = TRUE)
+  predicted_means_ar1_long_term_kfold <- rowMeans(predictions_ar1_long_term_kfold)
+  
+  rmse_ar1_long_term_kfold <- sqrt(mean((validation_set_kfold_long_term$NumericDate - predicted_means_ar1_long_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_ar1_long_term_kfold <- loo(AR1_long_term_kfold)
+  
+  list(model = AR1_long_term_kfold, rmse = rmse_ar1_long_term_kfold, loo = loo_result_ar1_long_term_kfold)
+
+
+  
+  # Fitting the model
+  AR1_short_term_kfold <- brm(
+    formula = NumericDate ~ Value_lag1 + (1 | SiteName),
+    data = training_set_kfold_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar1_short_term_kfold <- posterior_predict(AR1_short_term_kfold, newdata = validation_set_kfold_short_term)
+  predicted_means_ar1_short_term_kfold <- rowMeans(predictions_ar1_short_term_kfold)
+  
+  rmse_ar1_short_term_kfold <- sqrt(mean((validation_set_kfold_short_term$NumericDate - predicted_means_ar1_short_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_ar1_short_term_kfold <- loo(AR1_short_term_kfold)
+  
+  list(model = AR1_short_term_kfold, rmse = rmse_ar1_short_term_kfold, loo = loo_result_ar1_short_term_kfold)
+
+```
+
+
+AR(2) Model BRMS
+
+
+```{r, include=FALSE}
+# Fitting the AR(2) model
+ar2_model <- brm(
+  formula = NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName),
+  data = training_ar2,
+  family = gaussian(),
+  chains = 2, 
+  iter = 2000,
+  warmup = 500,
+  control = list(adapt_delta = 0.95)
+)
+
+# Summarizing the model
+summary(ar2_model)
+
+
+
+# Predicting for 2033
+predictions_AR2 <- posterior_predict(ar2_model, newdata = test_ar2, allow_new_levels =TRUE)
+
+# Converting numeric date back to Date
+predicted_date_2033_AR2 <- as.Date(round(mean(predictions_AR2)))
+
+# Printting the predicted date for 2033
+print(predicted_date_2033_AR2)
+
+
+
+##Model evaluation (LOO-CV)
+
+# Extracting log-likelihood values
+log_lik_AR2 <- log_lik(ar2_model)
+
+# Calculating relative effective sample sizes
+r_eff_AR2 <- relative_eff(exp(log_lik_AR2), chain_id = rep(1:4, each = nrow(log_lik_AR2) / 4))
+
+# Performing LOO-CV with r_eff
+loo_result_AR2 <- loo(log_lik_AR2, r_eff = r_eff_AR2)
+
+# Printing the LOO-CV results
+print(loo_result_AR2)
+
+
+##Model evaluation (RMS)
+
+#Predictions on training data
+predictions_ar2 <- posterior_predict(ar2_model, summary = FALSE)
+
+#mean of predicted values for each point
+predicted_means_ar2 <- rowMeans(predictions_ar2)
+
+
+#Calculationg RMS
+rmse_ar2 <- calculate_rmse_ar1(training_ar2$NumericDate, predicted_means_ar2)
+print(paste("RMSE for the AR(2) model:", rmse_ar2))
+
+```
+
+
+AR(2) on different scenarios
+
+
+```{R}
+
+# Fitting the model
+  AR2_long_term <- brm(
+    formula = NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName),
+    data = training_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar2_long_term <- posterior_predict(AR2_long_term, newdata = validation_long_term, allow_new_levels = TRUE)
+  predicted_means_ar2_long_term <- rowMeans(predictions_ar2_long_term)
+  
+  rmse_ar2_long_term <- sqrt(mean((validation_long_term$NumericDate - predicted_means_ar2_long_term)^2))
+  
+  # LOO-CV
+  loo_result_ar2_long_term <- loo(AR2_long_term)
+  
+  list(model = AR2_long_term, rmse = rmse_ar2_long_term, loo = loo_result_ar2_long_term)
+
+
+  
+  # Fitting the model
+  AR2_short_term <- brm(
+    formula = NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName),
+    data = training_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar2_short_term <- posterior_predict(AR2_short_term, newdata = validation_short_term)
+  predicted_means_ar2_short_term <- rowMeans(predictions_ar2_short_term)
+  
+  rmse_ar2_short_term <- sqrt(mean((validation_short_term$NumericDate - predicted_means_ar2_short_term)^2))
+  
+  # LOO-CV
+  loo_result_ar2_short_term <- loo(AR2_short_term)
+  
+  list(model = AR2_short_term, rmse = rmse_ar2_short_term, loo = loo_result_ar2_short_term)
+
+
+```
+
+
+AR(2) on different scenarios (k-fold)
+
+
+```{R}
+
+# Fitting the model
+  AR2_long_term_kfold <- brm(
+    formula = NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName),
+    data = training_set_kfold_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar2_long_term_kfold <- posterior_predict(AR2_long_term_kfold, newdata = validation_set_kfold_long_term, allow_new_levels = TRUE)
+  predicted_means_ar2_long_term_kfold <- rowMeans(predictions_ar2_long_term_kfold)
+  
+  rmse_ar2_long_term_kfold <- sqrt(mean((validation_set_kfold_long_term$NumericDate - predicted_means_ar2_long_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_ar2_long_term_kfold <- loo(AR2_long_term_kfold)
+  
+  list(model = AR2_long_term_kfold, rmse = rmse_ar2_long_term_kfold, loo = loo_result_ar2_long_term_kfold)
+
+
+  
+  # Fitting the model
+  AR2_short_term_kfold <- brm(
+    formula = NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName),
+    data = training_set_kfold_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_ar2_short_term_kfold <- posterior_predict(AR2_short_term_kfold, newdata = validation_set_kfold_short_term, allow_new_levels = TRUE)
+  predicted_means_ar2_short_term_kfold <- rowMeans(predictions_ar2_short_term_kfold)
+  
+  rmse_ar2_short_term_kfold <- sqrt(mean((validation_set_kfold_short_term$NumericDate - predicted_means_ar2_short_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_ar2_short_term_kfold <- loo(AR2_short_term_kfold)
+  
+  list(model = AR2_short_term_kfold, rmse = rmse_ar2_short_term_kfold, loo = loo_result_ar2_short_term_kfold)
+
+
+```
+
+
+Generalized Autoregressive Conditional Heteroskedasticity (GARCH)
+
+
+```{R, include= FALSE}
+
+heteroskedastic_model <- brm(
+  bf(NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName), sigma ~ s(Year, bs = "gp")),
+  data = training_ar2,
+  family = gaussian(),
+  chains = 2,
+  iter = 2000,
+  warmup = 500,
+  control = list(adapt_delta = 0.95)
+)
+
+# Summarizing the model
+summary(heteroskedastic_model)
+
+
+
+# Predicting for 2033
+predictions_GARCHE <- posterior_predict(heteroskedastic_model, newdata = test_ar2, allow_new_levels = TRUE)
+
+# Extracting the mean prediction
+predicted_day_of_year_GARCHE <- round(mean(predictions_GARCHE))
+
+# Converting Julian day back to Date
+predicted_date_2033_GARCHE <- as.Date(paste0("2033-01-01")) + (predicted_day_of_year_GARCHE - 1)
+
+# Printing the predicted date for 2033
+print(predicted_date_2033_GARCHE)
+
+
+##Model evaluation LOO-CV
+# Extracting log-likelihood values
+log_lik_GARCH <- log_lik(heteroskedastic_model)
+
+# Calculating relative effective sample sizes
+r_eff_GARCH <- relative_eff(exp(log_lik_GARCH), chain_id = rep(1:4, each = nrow(log_lik_GARCH) / 4))
+
+loo_result_GARCH <- loo(log_lik_GARCH, r_eff = r_eff_GARCH)
+print(loo_result_GARCH)
+
+##Model evaluation (RMS)
+
+#Predictions on training data
+predictions_GARCH <- posterior_predict(heteroskedastic_model, summary = FALSE)
+
+#mean of predicted values for each point
+predicted_means_GARCH <- rowMeans(predictions_GARCH)
+
+#Calculationg RMS
+rmse_GARCH <- calculate_rmse_ar1(training_ar2$NumericDate, predicted_means_GARCH)
+print(paste("RMSE for the GARCH model:", rmse_GARCH))
+
+```
+
+
+GARCH for different scenarios
+
+
+```{R}
+
+# Fitting the model
+  GARCH_long_term <- brm(
+    bf(NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName), sigma ~ s(Year, bs = "gp")),
+    data = training_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GARCH_long_term <- posterior_predict(GARCH_long_term, newdata = validation_long_term, allow_new_levels = TRUE)
+  predicted_means_GARCH_long_term <- rowMeans(predictions_GARCH_long_term)
+  
+  rmse_GARCH_long_term <- sqrt(mean((validation_long_term$NumericDate - predicted_means_GARCH_long_term)^2))
+  
+  # LOO-CV
+  loo_result_GARCH_long_term <- loo(GARCH_long_term)
+  
+  list(model = GARCH_long_term, rmse = rmse_GARCH_long_term, loo = loo_result_GARCH_long_term)
+
+
+  
+  # Fitting the model
+  GARCH_short_term <- brm(
+    bf(NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName), sigma ~ s(Year, bs = "gp")),
+    data = training_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GARCH_short_term <- posterior_predict(GARCH_short_term, newdata = validation_short_term, allow_new_levels = TRUE)
+  predicted_means_GARCH_short_term <- rowMeans(predictions_GARCH_short_term)
+  
+  rmse_GARCH_short_term <- sqrt(mean((validation_short_term$NumericDate - predicted_means_GARCH_short_term)^2))
+  
+  # LOO-CV
+  loo_result_GARCH_short_term <- loo(GARCH_short_term)
+  
+  list(model = GARCH_short_term, rmse = rmse_GARCH_short_term, loo = loo_result_GARCH_short_term)
+
+
+
+```
+
+
+GARCH for different scenarios (k-fold)
+
+
+```{R}
+
+# Fitting the model
+  GARCH_long_term_kfold <- brm(
+    bf(NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName), sigma ~ s(Year, bs = "gp")),
+    data = training_set_kfold_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GARCH_long_term_kfold <- posterior_predict(GARCH_long_term_kfold, newdata = validation_set_kfold_long_term, allow_new_levels = TRUE)
+  predicted_means_GARCH_long_term_kfold <- rowMeans(predictions_GARCH_long_term_kfold)
+  
+  rmse_GARCH_long_term_kfold <- sqrt(mean((validation_set_kfold_long_term$NumericDate - predicted_means_GARCH_long_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_GARCH_long_term_kfold <- loo(GARCH_long_term_kfold)
+  
+  list(model = GARCH_long_term_kfold, rmse = rmse_GARCH_long_term_kfold, loo = loo_result_GARCH_long_term_kfold)
+
+
+  
+  # Fitting the model
+  GARCH_short_term_kfold <- brm(
+    bf(NumericDate ~ Value_lag1 + Value_lag2 + (1 | SiteName), sigma ~ s(Year, bs = "gp")),
+    data = training_set_kfold_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GARCH_short_term_kfold <- posterior_predict(GARCH_short_term_kfold, newdata = validation_set_kfold_short_term, allow_new_levels = TRUE)
+  predicted_means_GARCH_short_term_kfold <- rowMeans(predictions_GARCH_short_term_kfold)
+  
+  rmse_GARCH_short_term_kfold <- sqrt(mean((validation_set_kfold_short_term$NumericDate - predicted_means_GARCH_short_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_GARCH_short_term_kfold <- loo(GARCH_short_term_kfold)
+  
+  list(model = GARCH_short_term_kfold, rmse = rmse_GARCH_short_term_kfold, loo = loo_result_GARCH_short_term_kfold)
+
+
+
+```
+
+
+GAM
+
+```{R}
+#Model formula using a spline for Year
+formula_gam <- bf(
+  NumericDate ~ s(Year, bs = "tp") + Value_lag1 + Value_lag2 + (1 | SiteName),
+  sigma ~ s(Year, bs = "tp")  
+)
+
+# Fitting the model
+gam_model <- brm(
+  formula = formula_gam,
+  data = training_ar2,
+  family = gaussian(),
+  chains = 2,      
+  cores = 4,       
+  iter = 2000,    
+  warmup = 500    
+)
+
+# Summarizing the model
+summary(gam_model)
+
+
+# Predicting for 2033
+predicted_day_of_year_GAM <- predict(gam_model, newdata = test_ar2)
+
+# Converting Julian day back to Date
+predicted_date_2033_GAM <- as.Date(paste0("2033-01-01")) + (predicted_day_of_year_GAM - 1)
+
+# Printing the predicted date for 2033
+print(predicted_date_2033_GAM)
+
+
+##Model evaluation LOO-CV
+loo_result_GAM <- loo(gam_model)
+print(loo_result_GAM)
+
+##Model evaluation (RMS)
+
+#Predictions on training data
+predictions_GAM <- posterior_predict(gam_model, summary = FALSE, allow_new_levels = TRUE)
+
+#mean of predicted values for each point
+predicted_means_GAM <- rowMeans(predictions_GAM)
+
+
+#Calculationg RMS
+rmse_GAM <- calculate_rmse_ar1(training_ar2$NumericDate, predicted_means_GAM)
+print(paste("RMSE for the GAM model:", rmse_GAM))
+```
+
+
+GAM for different scenarios
+
+
+```{R}
+# Fitting the model
+  GAM_long_term <- brm(
+    formula = formula_gam,
+    data = training_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GAM_long_term <- posterior_predict(GAM_long_term, newdata = validation_long_term, allow_new_levels = TRUE)
+  predicted_means_GAM_long_term <- rowMeans(predictions_GAM_long_term)
+  
+  rmse_GAM_long_term <- sqrt(mean((validation_long_term$NumericDate - predicted_means_GAM_long_term)^2))
+  
+  # LOO-CV
+  loo_result_GAM_long_term <- loo(GAM_long_term)
+  
+  list(model = GAM_long_term, rmse = rmse_GAM_long_term, loo = loo_result_GAM_long_term)
+
+
+  
+  # Fitting the model
+  GAM_short_term <- brm(
+    formula = formula_gam,
+    data = training_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GAM_short_term <- posterior_predict(GAM_short_term, newdata = validation_short_term, allow_new_levels = TRUE)
+  predicted_means_GAM_short_term <- rowMeans(predictions_GAM_short_term)
+  
+  rmse_GAM_short_term <- sqrt(mean((validation_short_term$NumericDate - predicted_means_GAM_short_term)^2))
+  
+  # LOO-CV
+  loo_result_GAM_short_term <- loo(GAM_short_term)
+  
+  list(model = GAM_short_term, rmse = rmse_GAM_short_term, loo = loo_result_GAM_short_term)
+
+
+
+```
+
+
+GAM for different scenarios (k-fold)
+
+
+```{R}
+# Fitting the model
+  GAM_long_term_kfold <- brm(
+    formula = formula_gam,
+    data = training_set_kfold_long_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GAM_long_term_kfold <- posterior_predict(GAM_long_term_kfold, newdata = validation_set_kfold_long_term, allow_new_levels = TRUE)
+  predicted_means_GAM_long_term_kfold <- rowMeans(predictions_GAM_long_term_kfold)
+  
+  rmse_GAM_long_term_kfold <- sqrt(mean((validation_set_kfold_long_term$NumericDate - predicted_means_GAM_long_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_GAM_long_term_kfold <- loo(GAM_long_term_kfold)
+  
+  list(model = GAM_long_term_kfold, rmse = rmse_GAM_long_term_kfold, loo = loo_result_GAM_long_term_kfold)
+
+
+  
+  # Fitting the model
+  GAM_short_term_kfold <- brm(
+    formula = formula_gam,
+    data = training_set_kfold_short_term,
+    family = gaussian(),
+    chains = 2, 
+    iter = 2000,
+    warmup = 500,
+    control = list(adapt_delta = 0.95)
+  )
+  
+  # Predicting and calculating RMSE
+  predictions_GAM_short_term_kfold <- posterior_predict(GAM_short_term_kfold, newdata = validation_set_kfold_short_term, allow_new_levels = TRUE)
+  predicted_means_GAM_short_term_kfold <- rowMeans(predictions_GAM_short_term_kfold)
+  
+  rmse_GAM_short_term_kfold <- sqrt(mean((validation_set_kfold_short_term$NumericDate - predicted_means_GAM_short_term_kfold)^2))
+  
+  # LOO-CV
+  loo_result_GAM_short_term_kfold <- loo(GAM_short_term_kfold)
+  
+  list(model = GAM_short_term_kfold, rmse = rmse_GAM_short_term_kfold, loo = loo_result_GAM_short_term_kfold)
+
+```
+
+
+Model comparisons
+
+
+```{R}
+
+##LOOIC
+#Extracting only the looic score
+loo_result_AR1_looic <- loo_result_AR1$estimates["looic", "Estimate"]
+loo_result_AR1_looic_short_term <- loo_result_ar1_short_term$estimates["looic", "Estimate"]
+loo_result_AR1_looic_long_term <- loo_result_ar1_long_term$estimates["looic", "Estimate"]
+loo_result_AR1_looic_long_term_kfold <- loo_result_ar1_long_term_kfold$estimates["looic", "Estimate"]
+loo_result_AR1_looic_short_term_kfold <- loo_result_ar1_short_term_kfold$estimates["looic", "Estimate"]
+
+loo_result_AR2_looic <- loo_result_AR2$estimates["looic", "Estimate"]
+loo_result_AR2_looic_short_term <- loo_result_ar2_short_term$estimates["looic", "Estimate"]
+loo_result_AR2_looic_long_term <- loo_result_ar2_long_term$estimates["looic", "Estimate"]
+loo_result_AR2_looic_long_term_kfold <- loo_result_ar2_long_term_kfold$estimates["looic", "Estimate"]
+loo_result_AR2_looic_short_term_kfold <- loo_result_ar2_short_term_kfold$estimates["looic", "Estimate"]
+
+loo_result_GARCH_looic <- loo_result_GARCH$estimates["looic", "Estimate"]
+loo_result_GARCH_looic_short_term <- loo_result_GARCH_short_term$estimates["looic", "Estimate"]
+loo_result_GARCH_looic_long_term <- loo_result_GARCH_long_term$estimates["looic", "Estimate"]
+loo_result_GARCH_looic_long_term_kfold <- loo_result_GARCH_long_term_kfold$estimates["looic", "Estimate"]
+loo_result_GARCH_looic_short_term_kfold <- loo_result_GARCH_short_term_kfold$estimates["looic", "Estimate"]
+
+loo_result_GAM_looic <- loo_result_GAM$estimates["looic", "Estimate"]
+loo_result_GAM_looic_short_term <- loo_result_GAM_short_term$estimates["looic", "Estimate"]
+loo_result_GAM_looic_long_term <- loo_result_GAM_long_term$estimates["looic", "Estimate"]
+loo_result_GAM_looic_long_term_kfold <- loo_result_GAM_long_term_kfold$estimates["looic", "Estimate"]
+loo_result_GAM_looic_short_term_kfold <- loo_result_GAM_short_term_kfold$estimates["looic", "Estimate"]
+
+#Putting them together
+loo_models <- c(
+  AR1_model = loo_result_AR1_looic, AR1_short_term = loo_result_AR1_looic_short_term, AR1_long_term = loo_result_AR1_looic_long_term, AR1_short_term_kfold = loo_result_AR1_looic_short_term_kfold, AR1_long_term_kfold = loo_result_AR1_looic_long_term_kfold, 
+  AR2_model = loo_result_AR2_looic, AR2_short_term = loo_result_AR2_looic_short_term, AR2_long_term = loo_result_AR2_looic_long_term, AR2_short_term_kfold = loo_result_AR2_looic_short_term_kfold, AR2_long_term_kfold = loo_result_AR2_looic_long_term_kfold, 
+  GARCH = loo_result_GARCH_looic, GARCHm_short_term = loo_result_GARCH_looic_short_term, GARCHm_long_term = loo_result_GARCH_looic_long_term, GARCHm_short_term_kfold = loo_result_GARCH_looic_short_term_kfold, GARCHm_long_term_kfold = loo_result_GARCH_looic_long_term_kfold, 
+  GAM_model = loo_result_GAM_looic, GAM_model_short_term = loo_result_GAM_looic_short_term, GAM_model_long_term = loo_result_GAM_looic_long_term, GAM_model_short_term_kfold = loo_result_GAM_looic_short_term_kfold, GAM_model_long_term_kfold = loo_result_GAM_looic_long_term_kfold)
+
+#Selection of the lowest looic score
+best_loo <- names(which.min(loo_models))
+print(best_loo)
+
+#RMSE
+rmse_models <- c(
+  AR1_model = rmse_ar1,
+  AR1_short_term = rmse_ar1_short_term,
+  AR1_long_term = rmse_ar1_long_term,
+  AR1_short_term_kfold = rmse_ar1_short_term_kfold,
+  AR1_long_term_kfold = rmse_ar1_long_term_kfold,
+    
+  AR2_model = rmse_ar2, 
+  AR2_short_term = rmse_ar2_short_term,
+  AR2_long_term = rmse_ar2_long_term,
+  AR2_short_term_kfold = rmse_ar2_short_term_kfold,
+  AR2_long_term_kfold = rmse_ar2_long_term_kfold,
+    
+  GARCH_model = rmse_GARCH,
+  GARCHm_short_term = rmse_GARCH_short_term,
+  GARCHm_long_term = rmse_GARCH_long_term,
+  GARCHm_short_term_kfold = rmse_GARCH_short_term_kfold,
+  GARCHm_long_term_kfold = rmse_GARCH_long_term_kfold,
+    
+  GAM_model = rmse_GAM,
+  GAM_model_short_term = rmse_GAM_short_term,
+  GAM_model_long_term = rmse_GAM_long_term,
+  GAM_model_short_term_kfold = rmse_GAM_short_term_kfold,
+  GAM_model_long_term_kfold = rmse_GAM_long_term_kfold)
+
+# Selection of the model with the lowest RMSE score
+best_rmse <- names(which.min(rmse_models))
+print(best_rmse)
+
+```
+
+
+
+Table summing up results
+
+
+```{R}
+
+# Long-Term Prediction Results
+long_term_results <- data.frame(
+  Model = c("AR1", "AR1_long_term", "AR1_long_term_kfold",
+            "AR2", "AR2_long_term", "AR2_long_term_kfold",
+            "GARCH", "GARCH_long_term", "GARCH_long_term_kfold",
+            "GAM", "GAM_long_term", "GAM_long_term_kfold"),
+  Scenario = "Long-Term Prediction",
+  LOOIC_Estimate = c(49717.9, 61990.3, 2260.1,
+                     49737.9, 61990.4, 2251.3,
+                     447606.3, 58937.7, 1022.0,
+                     47427.7, 58794.5, 2143.5),
+  LOOIC_SE = c(819.6, 893.8, 736.5, 
+               821.0, 895.0, 85.9,
+               915.5, 1019.5, 50.6,
+               976.6, 1074.0, 48.1),
+  
+  RMSE = c(32.8668769934646, 25.25375, 11.0288527, 
+           32.8679509811609, 25.43484, 10.654226,
+           32.9490890745172, 24.01065, 6.121305,
+           32.8661373152288, 23.04074, 4.99656411)
+)
+
+# Short-Term Prediction Results
+short_term_results <- data.frame(
+  Model = c("AR1", "AR1_short_term", "AR1_short_term_kfold",
+            "AR2", "AR2_short_term", "AR2_short_term_kfold", 
+            "GARCH", "GARCH_short_term", "GARCH_short_term_kfold", 
+            "GAM", "GAM_short_term", "GAM_short_term_kfold"),
+  Scenario = "Short-Term Prediction",
+  LOOIC_Estimate = c(49717.9, 61159.2, 61972.6, 
+                     49737.9, 61152.2, 3264.7,
+                     47606.3, 58255.5, 58743.7,
+                     47427.7, 57883.5, 58474.4),
+  LOOIC_SE = c(819.6, 879.8, 898.7, 
+               821.0, 880.8, 110.3,
+               915.5, 1029.0, 1022.0,
+               976.6, 1035.6, 1094.3),
+  RMSE = c(32.8668769934646, 24.9667, 24.916429, 
+           32.8679509811609, 25.09681, 24.831462,
+           32.9490890745172, 24.21252, 22.9267711,
+           32.8661373152288, 24.38659, 23.382039)
+)
+
+kable(long_term_results)
+kable(short_term_results)
+
+# Combining all results into a single table
+summary_table <- rbind(long_term_results, short_term_results)
+print(summary_table)
+kable(summary_table, caption = "Summary of LOOIC and RMSE for Different Models and Scenarios")
+
+
+write.csv(long_term_results, "long_term_results1.csv")
+write.csv(short_term_results, "short_term_results1.csv")
+
+```
+
