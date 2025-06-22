@@ -61,7 +61,7 @@ studies$var_log_rr <- (1/studies$A) - (1/studies$B) + (1/studies$C) +(1/studies$
 studies$var_rr <- (log(studies$RR))^2 * studies$var_log_rr
 
 print(studies[,c("Author", "OR", "var_or", "RR", "var_rr")])
-```
+````
 
 
 

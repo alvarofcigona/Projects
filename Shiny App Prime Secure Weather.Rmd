@@ -1,0 +1,156 @@
+---
+title: "Prime Secure Weather Interactive App"
+author: "Alvaro Fernandez de la Cigoña"
+date: "2025-04-05"
+output: html_document
+runtime: shiny
+---
+
+
+```{R}
+library(dplyr)
+library(lubridate)
+library(readxl)
+library(brms)
+library(ggplot2)
+
+
+data_main <- read_excel("/Users/alvarofernandezdelacigonabarreiro/Desktop/Research Analyst - results.xlsx") %>%
+  mutate(`Event Date` = as.Date(`Event Date`, format = "%Y-%m-%d"),
+         EnvResolution = ifelse(Resolution == "Environmental Conditions", 1, 0))
+
+#Appending the randomly generated weather data to each row
+data_main <- data_main %>%
+  mutate(
+#Simulating Rain: 40% chance for "Yes" and 60% chance for "No"
+    Rain = sample(c("Yes", "No"), size = n(), replace = TRUE, prob = c(0.4, 0.6)),
+#For MeanTemp: if rain == "Yes", random value between 7 and 8°C; else between 10 and 11°C
+    MeanTemp = ifelse(Rain == "Yes", round(runif(n(), min = 7, max = 8), 1),
+                      round(runif(n(), min = 10, max = 11), 1)),
+#For Precipitation: if rain == "Yes", random value between 4 and 6 mm; else between 0 and 2 mm
+    Precipitation = ifelse(Rain == "Yes", round(runif(n(), min = 4, max = 6), 1),
+                           round(runif(n(), min = 0, max = 2), 1))
+  )
+
+#Getting the 10 most problematic sites
+important_sites <- c("Ki 6PA", "RirmFK", "Bl2)KY", "Ma2SEH", "Wa10EH", 
+                     "TAetG3", "TAesPH", "Bl3SPH", "An85DE", "Th08NE")
+data_model <- data_main %>% filter(`Site Name` %in% important_sites)
+
+#Fitting a Bayesian logistic regression model using brms
+bayes_model <- brm(
+  EnvResolution ~ MeanTemp + Precipitation,
+  data = data_model,
+  family = bernoulli(link = "logit"),
+  prior = c(
+    prior(normal(0, 1), class = "b"),
+    prior(normal(0, 1), class = "Intercept")
+  ),
+  chains = 2, iter = 2000, warmup = 1000,
+  control = list(adapt_delta = 0.95)
+)
+
+summary(bayes_model)
+
+#Predicting under a new weather scenario (example: MeanTemp = 9°C, Precipitation = 4 mm)
+new_weather <- data.frame(MeanTemp = 9, Precipitation = 4)
+predicted_prob <- posterior_epred(bayes_model, newdata = new_weather)
+predicted_prob_summary <- data.frame(
+  Mean = mean(predicted_prob),
+  Lower = quantile(predicted_prob, 0.025),
+  Upper = quantile(predicted_prob, 0.975)
+)
+print(predicted_prob_summary)
+
+#Posterior prediction distribution
+ggplot(data.frame(prob = as.vector(predicted_prob)), aes(x = prob)) +
+  geom_density(fill = "steelblue", alpha = 0.6) +
+  labs(title = "Posterior Prediction Distribution",
+       x = "Predicted Probability of 'Environmental Conditions'",
+       y = "Density") +
+  theme_minimal()
+```
+The density plot shows the posterior distribution for the predicted probability of an "Environmental Conditions" resolution under a scenario of MeanTemp = 9°C and Precipitation = 4 mm. The narrow, tight peak indicates that the model is quite confident that the probability is very low (around 0.2–0.3%)
+
+
+```{R include = TRUE}
+library(shiny)
+library(ggplot2)
+library(dplyr)
+library(hms)
+library(lubridate)
+
+
+#Filtering the data for only these important sites
+data_important <- data_main %>%
+  filter(`Site Name` %in% important_sites)
+
+####For demonstration, a dummy predictive function has been created.
+#In practice, here we would load our bayesian predictive model
+#Here, it is being simulated a logistic model where the linear predictor is:
+# LP = intercept + beta1 * Temperature + beta2 * Precipitation
+
+
+predict_env_prob <- function(temp, precip) {
+#these would come from the actual model
+  intercept <- -0.5
+  beta_temp <- 0.1
+  beta_precip <- -0.2
+  
+  lp <- intercept + beta_temp * temp + beta_precip * precip
+  prob <- plogis(lp)
+  return(prob)
+}
+
+
+# For this demo, we focus only on the weather inputs that affect the prior.
+
+ui <- fluidPage(
+  titlePanel("Environmental Conditions Resolution Predictor"),
+  sidebarLayout(
+    sidebarPanel(
+      h4("Set Weather Conditions"),
+      sliderInput("temp", "Temperature (°C):", min = 0, max = 20, value = 10, step = 0.5),
+      sliderInput("precip", "Precipitation (mm):", min = 0, max = 20, value = 5, step = 0.5),
+      actionButton("predict", "Predict")
+    ),
+    mainPanel(
+      h4("Predicted Probability for 'Environmental Conditions' Resolution"),
+      textOutput("probText"),
+      plotOutput("probPlot"),
+      br(),
+      p("This app simulates a Bayesian prior based on weather conditions (temperature and precipitation). 
+        The predicted probability represents the chance that an incident (at one of the most important sites)
+        is resolved as 'Environmental Conditions.' Adjust the weather inputs and click Predict to see the result.")
+    )
+  )
+)
+
+server <- function(input, output) {
+  
+  prediction <- eventReactive(input$predict, {
+# Predicting probability using the dummy predictive function
+    predict_env_prob(temp = input$temp, precip = input$precip)
+  })
+  
+  output$probText <- renderText({
+    req(prediction())
+    paste0("Predicted probability: ", round(prediction()*100, 2), "%")
+  })
+  
+  output$probPlot <- renderPlot({
+    req(prediction())
+# Creating a simple bar plot to visualize the predicted probability
+    ggplot(data.frame(Resolution = "Environmental Conditions", Probability = prediction()),
+           aes(x = Resolution, y = Probability)) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      ylim(0, 1) +
+      labs(x = "Resolution", y = "Predicted Probability") +
+      ggtitle("Predicted Probability of Environmental Conditions Resolution") +
+      theme_minimal()
+  })
+}
+
+shinyApp(ui = ui, server = server)
+
+```

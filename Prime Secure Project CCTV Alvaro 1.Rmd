@@ -1,0 +1,542 @@
+---
+title: "Prime Secure Project CCTV Alvaro"
+author: "Alvaro Fernandez de la Cigona"
+date: "2025-04-03"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{R}
+library(readxl)
+library(dplyr)
+library(hms)
+library(ggplot2)
+library(forcats)
+library(knitr)
+library(lubridate)
+library(factoextra)
+library(corrplot)
+library(FactoMineR)
+
+```
+
+Loading Data Set
+
+```{R}
+data <- read_excel("/Users/alvarofernandezdelacigonabarreiro/Desktop/Research Analyst - results.xlsx")
+```
+
+
+Starting with Data Exploration (Understanding our data)
+
+```{R}
+head(data)
+tail(data)
+str(data)
+summary(data)
+```
+
+Understanding each variable in our data
+
+-Unique Site Names:
+
+```{R}
+different_sites <- unique(data$`Site Name`)
+print(different_sites)
+length(different_sites)
+```
+To note, only one NA, it has to be looked at. 165 different sites.
+
+-Unique Link Accounts:
+
+```{R}
+different_Link_Account<- unique(data$`Link Account`)
+print(different_Link_Account)
+length(different_Link_Account)
+```
+To note, only one NA, has to be looked at. 145 Link accounts, very similar to the number of sites previously seen (165)...
+
+-Unique Event Dates:
+
+```{R}
+different_event_date<- unique(data$`Event Date`)
+print(different_event_date)
+length(different_event_date)
+```
+To note, only one NA, has to be looked at. Character dates have to be converted to date objects and then ordered. 38 days recorded of incidents. 
+Further develop metrics to understand how incidents vary through the days (same with times)
+
+-Unique Event Times
+
+```{R, include = FALSE}
+different_event_time<- unique(data$`Event Time`)
+print(different_event_time)
+```
+To note, check NAs here important, and order them. No need to use length here, they are all times, irrelevant for study.
+
+-Unique Event Details
+
+```{R, include = FALSE}
+different_event_detail<- unique(data$`Event Detail`)
+print(different_event_detail)
+length(different_event_detail)
+```
+To note, event time and the times behind the events are almost the same, many details merged into a variable, Dangerous (24495 different details)? Mice library to mine and understand better this variable.
+
+-Unique Resolutions:
+
+```{R}
+different_resolutions<- unique(data$Resolution)
+print(different_resolutions)
+length(different_resolutions)
+```
+To note, 19 different resolutions.
+
+-Unique Handling Times:
+
+```{R, include = FALSE}
+different_handling_times <- unique(data$`Handling Time`)
+print(different_handling_times)
+```
+To note, order these ones to see distribution, could be created as a new data frame and treat them as a distribution for analysis.
+
+-Unique Installers:
+
+```{R}
+different_installer <- unique(data$Installer)
+print(different_installer)
+```
+To note, only two installers. How many incidents does each one have?
+
+```{R}
+installer_counts <- data %>%
+  filter(!is.na(Installer)) %>%
+  group_by(Installer) %>%
+  summarise(incidents = n(), .groups = "drop")
+
+installer_data <- data.frame(
+  Installer = c("Prime Secure", "Select Solutions"),
+  incidents = c(148862, 194)
+)
+
+kable(installer_data, caption = "Incident Counts by Installer")
+```
+
+
+-Unique Operators:
+
+```{R}
+different_operator <- unique(data$Operator)
+print(different_operator)
+```
+To note, One NA, 13 operators only counting NA.
+
+
+Important to start grouping them together to see relations, many of them have only one NA, investigate about this.
+
+Rearraning Data in an order and clearer way. Also checking missing values Data set.
+
+```{R}
+data_ordered <- data %>%
+  mutate(`Event Date` = as.Date(`Event Date`, format = "%d/%m/%Y"), `Event Time` = as_hms(`Event Time`)) %>%
+  arrange(`Site Name`, `Event Date`, `Event Time`)
+
+print(data_ordered)
+
+#Missing Values
+sapply(data, function(x) sum(is.na(x)))
+
+#Table Missing values
+na_summary <- data.frame(
+  `Variable Group` = c("Site Name, Event Date, Event Time, Event Detail",
+                       "Handling Time and Operator",
+                       "Link Account"),
+  `NA Count` = c(43417, 128555, 53724)
+)
+kable(na_summary, caption = "Summary of Missing Values by Variable Group")
+```
+
+
+Combining variables for understanding
+
++ Operators and number of resolutions each:
+```{R}
+# Calculating the number of resolutions given by each operator
+operator_resolution_counts <- data %>%
+  filter(!is.na(Operator) & !is.na(Resolution)) %>%
+  group_by(Operator, Resolution) %>%
+  summarise(count = n(), .groups = "drop")
+
+operator_resolution_counts_filtered <- operator_resolution_counts %>%
+  filter(!is.na(Operator) & !is.na(Resolution))
+
+ggplot(operator_resolution_counts_filtered, aes(x = Operator, y = count, fill = Resolution)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_y_log10() +
+  labs(title = "Number of Resolutions Given by Each Operator (NA Excluded)",
+       x = "Operator",
+       y = "Count of Resolutions (log scale)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+This grouped bar plot shows the count of different resolutions given by each operator (with NA values excluded). The log scale on the y-axis compresses large counts and expands small ones, making it easier to compare operators even when counts differ by several orders of magnitude.
+Let's see the counts
+
+```{R}
+operator_counts <- data %>%
+  filter(!is.na(Operator)) %>%
+  group_by(Operator) %>%
+  summarise(incidents = n()) %>%
+  arrange(desc(incidents))
+
+ggplot(operator_counts, aes(x = reorder(Operator, incidents), y = incidents)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  scale_y_log10() +
+  coord_flip() +
+  labs(title = "Number of Incidents Reported per Operator (Log Scale)",
+       x = "Operator",
+       y = "Incident Count (log scale)") +
+  theme_minimal()
+```
+AE has the highest incident count among the listed operators. CT appears at the bottom, indicating the lowest count in this group. Without the log scale, the operator with the highest count (AE) would dwarf the others on a standard linear axis, making smaller differences among the rest harder to see.
+
+
++ Handling time per Operator
+```{R}
+# Calculating the average handling time (in seconds) for each operator
+avg_handling_time <- data %>%
+  filter(!is.na(Operator) & !is.na(`Handling Time`)) %>%
+  mutate(HandlingTimeSec = as.numeric(as_hms(`Handling Time`))) %>%
+  group_by(Operator) %>%
+  summarise(
+    avg_time = mean(HandlingTimeSec, na.rm = TRUE),
+    count = n()
+  ) %>%
+  arrange(desc(avg_time))
+
+print(avg_handling_time)
+
+# Creating a horizontal bar plot for average handling time by operator
+ggplot(avg_handling_time, aes(x = reorder(Operator, avg_time), y = avg_time)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Average Handling Time per Operator",
+    x = "Operator",
+    y = "Average Handling Time (seconds)"
+  ) +
+  theme_minimal()
+```
+AJA, AMC, and RK have the longest average handling times, exceeding 500 seconds (~8.3 minutes). They may be handling more complex incidents, have less experience, or inefficiencies in their workflow.
+AK, DA, and NR have the shortest handling times, all averaging under 200 seconds (~3.3 minutes). Indicating higher efficiency.
+Despite AE having the highest incident volume (from the previous plot), their handling time is around average, which suggests balanced performance – they handle a lot without compromising too much on speed.
+
+
++Average Handling Time
+```{R}
+
+# Calculating the overall average handling time (response time) in seconds
+avg_response_time <- data %>%
+  filter(!is.na(`Handling Time`)) %>% 
+  mutate(HandlingTimeSec = as.numeric(as_hms(`Handling Time`))) %>%
+  summarise(avg_response_sec = mean(HandlingTimeSec, na.rm = TRUE))
+
+print(avg_response_time)
+
+avg_response_time/60
+
+avg_response <- data.frame(
+  avg_response_sec = 5.642251
+)
+
+#Table
+kable(avg_response, caption = "Average Response Time")
+```
++Average Handling Time per Site
+
+```{R}
+# Calculating the average handling time (in seconds) for each site
+avg_handling_time_by_site <- data %>%
+  filter(!is.na(`Site Name`) & !is.na(`Handling Time`)) %>%
+  mutate(HandlingTimeSec = as.numeric(as_hms(`Handling Time`))) %>%
+  group_by(`Site Name`) %>%
+  summarise(
+    avg_handling = mean(HandlingTimeSec, na.rm = TRUE),
+    count = n()
+  ) %>%
+  arrange(desc(avg_handling))
+
+print(avg_handling_time_by_site)
+
+# Plotting the average handling time by site
+ggplot(avg_handling_time_by_site, aes(x = reorder(`Site Name`, avg_handling), y = avg_handling)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Average Handling Time by Site",
+    x = "Site Name",
+    y = "Average Handling Time (seconds)"
+  ) +
+  theme_minimal()
+
+top_sites_time <- head(avg_handling_time_by_site, 10)
+
+# Table
+kable(top_sites_time, caption = "Top 10 Sites by Average Handling Time (seconds)")
+```
+St21NW has an average handling time of about 1638 seconds with a much larger sample (63 incidents), suggesting consistently longer handling times at that site.
+
+
++Incidents per site:
+
+```{R}
+#Incidents per site
+site_counts <- data %>%
+  filter(!is.na(`Site Name`)) %>%
+  group_by(`Site Name`) %>%
+  summarise(incidents = n()) %>%
+  arrange(desc(incidents)) %>%
+  mutate(`Site Name` = factor(`Site Name`, levels = unique(`Site Name`)))
+print(site_counts)
+
+#Most problematic sites to look at
+important_sites <- data.frame(
+  Site = c("Ki 6PA", "RirmFK", "Bl2)KY", "Ma2SEH", "Wa10EH", "TAetG3", "TAesPH", "Bl3SPH", "An85DE", "Th08NE"),
+  Count = c(22402, 17053, 11974, 7137, 3981, 2690, 2379, 2198, 2079, 2057)
+)
+print(important_sites)
+
+count_incidents_crucial_sites <- sum(important_sites$Count)
+
+total_incidents <- nrow(data)
+print(total_incidents)
+
+count_incidents_crucial_sites / total_incidents#
+
+incident_prop <- data.frame(
+  Metric = "Proportion of Incidents on Crucial Sites",
+  Value = 0.4961223
+)
+
+kable(incident_prop, caption = "Proportion of Incidents on 10 Crucial Sites (49% of all incidents)")
+
+#Table sites with their counts
+kable(important_sites, caption = "Important Sites and Their Incident Counts")
+
+#Creating a data set of the most important sites for anañysis
+important_sites <- c("Ki 6PA", "RirmFK", "Bl2)KY", "Ma2SEH", "Wa10EH", 
+                     "TAetG3", "TAesPH", "Bl3SPH", "An85DE", "Th08NE")
+
+# Filtering the data for only these important sites
+data_important <- data %>%
+  filter(`Site Name` %in% important_sites)
+
+
+```
+The first 10 most crucial sites by number of incidents represent 49% of the whole dataset, very very interesting, further exploring (could be compared with the resolutions of those sites, by getting those 10 sites as a data frame and analysing it, could be really representative.)
+
+
++ Resolutions
+```{R}
+resolution_counts <- data %>%
+  filter(!is.na(Resolution)) %>%
+  count(Resolution) %>%
+  arrange(desc(n)) %>%
+  mutate(Resolution = factor(Resolution, levels = Resolution))
+print(resolution_counts)
+
+
+#pie Chart of Resolutions
+pie_chart_frequencies <- ggplot(resolution_counts, aes(x = "", y = n, fill = Resolution)) +
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar(theta = "y", start = 0) +
+  labs(title = "Distribution of Resolutions", fill = "Resolution") +
+  theme_void()
+print(pie_chart_frequencies)
+```
+None assigned highest one but we will have to avoid for the moment, No visible cause second highest (error, human error?), and then environmental conditions (!!!Interesting this one!!!)
+
+
++Intruder Resolution Sites
+```{R}
+intruder_data <- data %>%
+  filter(!is.na(Resolution) & Resolution == "Intruder")
+
+total_intruder <- nrow(intruder_data)
+
+# Group by Site Name to see how many "Intruder" resolutions each site had
+intruder_by_site <- intruder_data %>%
+  group_by(`Site Name`) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  arrange(desc(Count))
+
+# Print total count
+cat("Total 'Intruder' resolutions:", total_intruder, "\n\n")
+
+# Display the table of sites with intruder resolutions
+kable(intruder_by_site, caption = "Sites with 'Intruder' Resolutions")
+
+
+#Going for the proportion of intrusions(comparing it with the whole data set)
+total_resolutions <- data %>%
+  filter(!is.na(Resolution)) %>%
+  summarise(total = n()) %>%
+  pull(total)
+
+intruder_count <- 58
+
+proportion_intruder <- intruder_count / total_resolutions
+
+#Table with the result
+intruder_prop_table <- data.frame(
+  Metric = "Proportion of 'Intruder' Resolutions",
+  Proportion = round(proportion_intruder, 4)
+)
+
+kable(intruder_prop_table, caption = "Proportion of 'Intruder' Resolutions")
+```
++handling time on each resolution
+
+````{R}
+# Preparing data, converting time data to seconds for analysis and getting rid of NAs
+data_ht_res_avg <- data %>%
+  filter(!is.na(Resolution), !is.na(`Handling Time`)) %>%
+  mutate(HandlingTimeSec = as.numeric(as_hms(`Handling Time`))) %>%
+  group_by(Resolution) %>%
+  summarise(avg_time = mean(HandlingTimeSec, na.rm = TRUE),
+            count = n()) %>%
+  arrange(desc(avg_time))
+
+print(data_ht_res_avg)
+
+# Creating a horizontal bar plot to visualize the average handling time per resolution category
+ggplot(data_ht_res_avg, aes(x = reorder(Resolution, avg_time), y = avg_time, fill = Resolution)) +
+  geom_bar(stat = "identity", width = 0.7) +
+  coord_flip() +
+  labs(title = "Average Handling Time by Resolution",
+       x = "Resolution",
+       y = "Average Handling Time (seconds)") +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 0))
+````
+
+
+MULTIDIMENSIONALITY REDUCTION
+Understanding the relationships of our multivariate data set. Let's see their relations interestingly plotted.
+
+Handling the multivariate data set for this task.
+NAs need to handle, categorical and numerical data have to be managed.
+
+-Handling Date and Time
+````{R}
+data_sub <- data %>%
+  mutate(
+    `Event Date` = as.Date(`Event Date`, format = "%d/%m/%Y"),
+    Month = month(`Event Date`),
+    DayOfWeek = wday(`Event Date`, label = TRUE),
+    `Event Time` = as_hms(`Event Time`),
+    Hour = hour(`Event Time`)
+  )
+````
+For dates and times, there are several options. A common approach is to extract meaningful features. For example, from an event date you might extract the month or day of week, and from an event time the hour. If I would have all more dates of the year they could be assigned a number.
+Still needed to decide if I want to keep the original date/time or just the extracted features.
+
+-Numeric Imputation (Handling NAs on numerical variables)
+Missing data can skew your analysis. Depending on the variable, you might:
+#Remove rows with missing values (if they are few).
+#Impute missing numeric values using the mean or median.
+#For categorical variables, impute with the mode or create a separate “Missing” level.
+
+````{R}
+data_sub <- data_sub %>%
+  mutate(across(c(`Handling Time`, Hour), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+````
+
+-Handling Categorical Variables (creating a seperate level for NAs)
+
+```{R}
+data_sub <- data_sub %>%
+  mutate(
+    Operator = ifelse(is.na(Operator), "Missing", Operator),
+    Resolution = ifelse(is.na(Resolution), "Missing", Resolution)
+  )
+sapply(data_sub, function(x) sum(is.na(x)))
+```
+
+Now, categorical variables need a one-hot encoding, numerical variables need handling for multiv. analysis:
+
+```{R}
+# Subset  data to the variables of interest for analysis
+subset_data_imp <- data_important %>%
+  select(`Site Name`, `Event Time`, Resolution, Installer) %>%
+  mutate(
+# Replacing missing values for categorical variables with "Missing"
+    `Site Name` = ifelse(is.na(`Site Name`), "Missing", `Site Name`),
+    Resolution  = ifelse(is.na(Resolution), "Missing", Resolution),
+    Installer   = ifelse(is.na(Installer), "Missing", Installer),
+# Convert Event Time to numeric (seconds since midnight)
+    EventTimeNumeric = as.numeric(as_hms(`Event Time`))
+  )
+
+# Imputing any missing or non-finite EventTimeNumeric values with the median
+median_event_time <- median(subset_data_imp$EventTimeNumeric, na.rm = TRUE)
+subset_data_imp <- subset_data_imp %>%
+  mutate(EventTimeNumeric = ifelse(is.na(EventTimeNumeric) | !is.finite(EventTimeNumeric),
+                                   median_event_time,
+                                   EventTimeNumeric))
+
+# Converting categorical variables to factors and drop unused levels
+subset_data_imp <- subset_data_imp %>%
+  mutate(
+    `Site Name` = as.factor(`Site Name`),
+    Resolution  = as.factor(Resolution),
+    Installer   = as.factor(Installer)
+  )
+
+# Define the categorical columns to encode
+cols_to_dummy <- c("Site Name", "Resolution", "Installer")
+
+# Identifying only those columns that have at least 2 levels
+valid_dummy <- sapply(subset_data_imp[, cols_to_dummy], function(x) length(levels(x)) >= 2)
+dummy_cols <- names(valid_dummy)[valid_dummy]
+
+# Handle spaces on dummy variables
+dummy_cols_quoted <- paste0("`", dummy_cols, "`")
+
+# Creating a formula for dummy encoding (exclude the intercept)
+dummy_formula <- as.formula(paste("~", paste(dummy_cols_quoted, collapse = " + "), " -1"))
+dummies_imp <- model.matrix(dummy_formula, data = subset_data_imp)
+
+# Combining the dummy variables with the numeric EventTimeNumeric variable
+data_imp_numeric <- cbind(dummies_imp, EventTimeNumeric = subset_data_imp$EventTimeNumeric)
+
+# Scaling the combined dataset
+data_imp_scaled <- scale(data_imp_numeric)
+
+# Performing PCA on the scaled subset
+pca_imp <- prcomp(data_imp_scaled, center = TRUE, scale. = TRUE)
+summary(pca_imp)  # Review variance explained
+
+# Visualising PCA using the first two principal components
+pca_imp_df <- as.data.frame(pca_imp$x)
+ggplot(pca_imp_df, aes(x = PC1, y = PC2)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "PCA for Important Sites (Site Name, Event Time, Resolution, Installer)",
+       x = "PC1", y = "PC2") +
+  theme_minimal()
+
+# Generating a PCA biplot with variable loadings (arrows)
+fviz_pca_biplot(pca_imp,
+                repel = TRUE,          
+                label = "var",         
+                col.var = "blue",      #Color arrows
+                col.ind = "grey50",    # Color individuals (observations)
+                title = "PCA Biplot: Variable Loadings and Observations")
+
+
+
+
+```
+
